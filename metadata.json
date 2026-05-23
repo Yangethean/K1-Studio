@@ -1,0 +1,6 @@
+{
+  "name": "Khmer Dub Studio",
+  "description": "Professional AI-assisted Khmer video dubbing and studio platform.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
