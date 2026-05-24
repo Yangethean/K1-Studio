@@ -1,4 +1,4 @@
-import { Film, FileText, Play, Pause, Languages, Loader2, Music, Download, Settings, Square, ListChecks, X, Undo2, Redo2, Link2, Link2Off, Plus, Minus, ZoomIn, ZoomOut, HelpCircle, Volume1, Volume2, VolumeX, AlertTriangle, Trash2 } from 'lucide-react';
+import { Film, FileText, Play, Pause, Languages, Loader2, Music, Download, Settings, Square, ListChecks, X, Undo2, Redo2, Link2, Link2Off, Plus, Minus, ZoomIn, ZoomOut, HelpCircle, Volume1, Volume2, VolumeX, AlertTriangle, Trash2, RotateCw } from 'lucide-react';
 import React, { useEffect, useRef, useState, useMemo, useCallback, Component } from 'react';
 import { motion } from 'motion/react';
 import { FFmpeg } from '@ffmpeg/ffmpeg';
@@ -882,6 +882,14 @@ const SubtitleListItem = React.memo(({
                 title="Preview Audio"
               >
                 {previewingId === sub.id ? <Square className="w-3.5 h-3.5 fill-current" /> : <Play className="w-3.5 h-3.5 fill-current" />}
+              </button>
+              <button 
+                onClick={(e) => handleGenerateSingle(e, sub)}
+                disabled={isGeneratingAll}
+                className="text-slate-500 hover:text-amber-400 transition-colors p-1 hover:bg-slate-800 rounded disabled:opacity-50"
+                title="Regenerate Audio"
+              >
+                <RotateCw className="w-3.5 h-3.5" />
               </button>
               <a href={sub.audioUrl} download={`sub_${sub.id}.wav`} className="text-slate-500 hover:text-white transition-colors p-1 hover:bg-slate-800 rounded" title="Download WAV" onClick={(e) => e.stopPropagation()}>
                 <Download className="w-3.5 h-3.5" />
