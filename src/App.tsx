@@ -137,6 +137,7 @@ interface Subtitle {
   speed?: number;
   emotionDetected?: boolean;
   emotionStatus?: 'detecting' | 'detected' | 'failed' | 'fallback';
+  speedMultiplier?: number;
 }
 
 // Convert "00:00:01,000" to seconds
@@ -250,6 +251,25 @@ function detectSpeaker(text: string): { speakerName: string; cleanText: string }
   return { speakerName: 'Default Speaker', cleanText: text.trim() };
 }
 
+function formatKeyCode(code: string) {
+  if (!code) return 'None';
+  if (code.startsWith('Key')) return code.slice(3);
+  if (code.startsWith('Digit')) return code.slice(5);
+  if (code.startsWith('Numpad')) return 'Num ' + code.slice(6);
+  if (code === 'BracketLeft') return '[';
+  if (code === 'BracketRight') return ']';
+  if (code === 'Semicolon') return ';';
+  if (code === 'Quote') return "'";
+  if (code === 'Comma') return ',';
+  if (code === 'Period') return '.';
+  if (code === 'Slash') return '/';
+  if (code === 'Backslash') return '\\';
+  if (code === 'Backquote') return '`';
+  if (code === 'Minus') return '-';
+  if (code === 'Equal') return '=';
+  return code;
+}
+
 // Parse standard SRT format
 function parseSRT(srt: string): Subtitle[] {
   const normalized = srt.replace(/\r\n/g, '\n');
@@ -316,6 +336,53 @@ function encodeWAV(samples: Int16Array, sampleRate: number = 24000): Blob {
   }
 
   return new Blob([view], { type: 'audio/wav' });
+}
+
+// Automatically peak-normalizes an audio blob to a target peak level (e.g., 0.95 or -0.44dBFS)
+async function normalizeAudioBlob(blob: Blob, targetPeak: number = 0.95): Promise<Blob> {
+  try {
+    const arrayBuffer = await blob.arrayBuffer();
+    const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+    const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+    
+    const sampleRate = audioBuffer.sampleRate;
+    const channelData = audioBuffer.getChannelData(0); // TTS output is mono
+    
+    let maxVal = 0;
+    for (let i = 0; i < channelData.length; i++) {
+      const val = Math.abs(channelData[i]);
+      if (val > maxVal) {
+        maxVal = val;
+      }
+    }
+    
+    if (maxVal < 0.0001) {
+      // Extremely low or silent audio, skip normalizing to avoid boosting noise floor
+      return blob;
+    }
+    
+    const gain = targetPeak / maxVal;
+    const pcm16 = new Int16Array(channelData.length);
+    for (let i = 0; i < channelData.length; i++) {
+      const scaled = channelData[i] * gain;
+      const clamped = Math.min(1.0, Math.max(-1.0, scaled));
+      pcm16[i] = clamped < 0 ? clamped * 32768 : clamped * 32767;
+    }
+    
+    // Attempt closing AudioContext to free system resources
+    try {
+      if (audioContext.state !== 'closed') {
+        await audioContext.close();
+      }
+    } catch (closeErr) {
+      console.warn("Could not close audioContext:", closeErr);
+    }
+    
+    return encodeWAV(pcm16, sampleRate);
+  } catch (err) {
+    console.error("Failed to automatically normalize audio:", err);
+    return blob; // Fallback to original blob in case decoding fails
+  }
 }
 
 // Memoized Timeline Clip for better performance
@@ -785,11 +852,22 @@ const SubtitleListItem = React.memo(({
           </div>
         </div>
         
-        <div className="flex items-center gap-1">
-          {sub.audioUrl && sub.audioDuration && (sub.audioDuration > sub.endTime - sub.startTime + 0.2) && (
-            <span className="text-[10px] text-rose-500 font-bold bg-rose-500/10 px-1 rounded animate-pulse" title="Audio is longer than subtitle clip">
-              Drift!
-            </span>
+        <div className="flex items-center gap-1.5">
+          {sub.audioUrl && sub.audioDuration && (sub.audioDuration > sub.endTime - sub.startTime + 0.1) && (
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                const containerDuration = sub.endTime - sub.startTime;
+                if (containerDuration > 0) {
+                  const targetSpeed = Math.min(2.5, Math.max(0.5, sub.audioDuration / containerDuration));
+                  updateSubtitles(prev => prev.map(item => item.id === sub.id ? { ...item, speedMultiplier: targetSpeed } : item));
+                }
+              }}
+              className="text-[9px] text-amber-500 font-bold bg-amber-500/10 hover:bg-amber-500/20 px-1.5 py-0.5 rounded border border-amber-500/20 active:scale-95 transition-all flex items-center gap-0.5 cursor-pointer select-none"
+              title="Speech is longer than subtitle window. Click to automatically speed-up speech to fit exact timing!"
+            >
+              ⚡ Auto-Fit
+            </button>
           )}
           {sub.isGenerating ? (
             <span className="text-[10px] text-amber-500 flex items-center gap-1">
@@ -956,6 +1034,43 @@ const SubtitleListItem = React.memo(({
         );
         })()}
       </div>
+
+       {sub.audioUrl && (
+         <div className="flex items-center gap-2.5 bg-slate-950/40 border border-slate-800/40 rounded-lg py-1.5 px-2.5 mt-2.5 flex-wrap sm:flex-nowrap">
+           <span className="text-[9px] text-slate-500 font-bold uppercase tracking-wider select-none shrink-0">Speech Speed:</span>
+           <input 
+             type="range"
+             min="0.5"
+             max="2.5"
+             step="0.05"
+             value={sub.speedMultiplier || 1.0}
+             onClick={(e) => e.stopPropagation()}
+             onChange={(e) => {
+               const val = parseFloat(e.target.value);
+               updateSubtitles(prev => prev.map(item => item.id === sub.id ? { ...item, speedMultiplier: val } : item));
+             }}
+             className="flex-1 h-1 accent-amber-500 rounded bg-slate-800 cursor-pointer min-w-[60px]"
+             title="Manually stretch speaking rate for this line"
+           />
+           <div className="flex items-center gap-1.5 ml-auto">
+             <span className="text-[10px] font-mono font-bold text-amber-500/95 w-11 shrink-0 text-right">
+               {(sub.speedMultiplier || 1.0).toFixed(2)}x
+             </span>
+             {sub.speedMultiplier && sub.speedMultiplier !== 1.0 && (
+               <button
+                 onClick={(e) => {
+                   e.stopPropagation();
+                   updateSubtitles(prev => prev.map(item => item.id === sub.id ? { ...item, speedMultiplier: undefined } : item));
+                 }}
+                 className="text-[9px] text-slate-400 hover:text-slate-200 bg-slate-800 hover:bg-slate-750 px-1.5 py-0.5 rounded border border-slate-700/60 active:scale-95 transition-all cursor-pointer select-none font-bold uppercase"
+                 title="Reset local speech speed to 1.0x"
+               >
+                 Reset
+               </button>
+             )}
+           </div>
+         </div>
+       )}
     </div>
   </div>
   );
@@ -1173,6 +1288,9 @@ export default function App() {
   const [videoUrl, setVideoUrl] = useState<string>('');
   const [timelineCurrentTime, setTimelineCurrentTime] = useState(0);
   const [videoDuration, setVideoDuration] = useState(0);
+  const [videoWaveformPeaks, setVideoWaveformPeaks] = useState<number[] | null>(null);
+  const [isExtractingVideoWaveform, setIsExtractingVideoWaveform] = useState(false);
+  const [hideVideoWaveform, setHideVideoWaveform] = useState(false);
   const [isTranscodingVideo, setIsTranscodingVideo] = useState(false);
   const [showMKVWarning, setShowMKVWarning] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -1186,13 +1304,170 @@ export default function App() {
   const activeAudioRefs = useRef<Map<number, HTMLAudioElement>>(new Map());
   const [videoVolume, setVideoVolume] = useState(0.1);
   const [dubVolume, setDubVolume] = useState(1.0);
+  const [isDuckingEnabled, setIsDuckingEnabled] = useState(() => {
+    const saved = localStorage.getItem('autosave_is_ducking_enabled');
+    return saved !== 'false';
+  });
+  const [duckingFactor, setDuckingFactor] = useState(() => {
+    const saved = localStorage.getItem('autosave_ducking_factor');
+    return saved ? parseFloat(saved) : 0.20;
+  });
+
+  useEffect(() => {
+    localStorage.setItem('autosave_is_ducking_enabled', String(isDuckingEnabled));
+  }, [isDuckingEnabled]);
+
+  const [isNormalizeEnabled, setIsNormalizeEnabled] = useState(() => {
+    const saved = localStorage.getItem('autosave_is_normalize_enabled');
+    return saved !== 'false'; // default to true (active)
+  });
+
+  useEffect(() => {
+    localStorage.setItem('autosave_is_normalize_enabled', String(isNormalizeEnabled));
+  }, [isNormalizeEnabled]);
+
+  useEffect(() => {
+    localStorage.setItem('autosave_ducking_factor', String(duckingFactor));
+  }, [duckingFactor]);
   const [ttsEngine, setTtsEngine] = useState<'gemini' | 'google-free' | 'voxcpm'>(() => (localStorage.getItem('tts_engine') as any) || 'voxcpm');
   const [defaultGeminiVoice, setDefaultGeminiVoice] = useState<'Puck' | 'Charon' | 'Kore' | 'Fenrir' | 'Aoede'>(() => (localStorage.getItem('default_gemini_voice') as any) || 'Puck');
   const [defaultVoxCPMVoice, setDefaultVoxCPMVoice] = useState(() => localStorage.getItem('default_voxcpm_voice') || 'khmer-male-1');
   const [leftPanelTab, setLeftPanelTab] = useState<'files' | 'speakers'>('files');
 
+  // Customizable Hotkeys State
+  const [customHotkeys, setCustomHotkeys] = useState<{ [actionId: string]: string }>(() => {
+    try {
+      const saved = localStorage.getItem('autosave_custom_hotkeys');
+      if (saved) return JSON.parse(saved);
+    } catch {}
+    return {
+      toggleVideoTrack: 'KeyQ',
+      toggleTextTrack: 'KeyW',
+      toggleDubTrack: 'KeyE',
+      jumpPrevSpeakerGroup: 'BracketLeft',
+      jumpNextSpeakerGroup: 'BracketRight',
+    };
+  });
+
+  const [activeHotkeyRecording, setActiveHotkeyRecording] = useState<string | null>(null);
+  const activeHotkeyRecordingRef = useRef<string | null>(null);
+  useEffect(() => {
+    activeHotkeyRecordingRef.current = activeHotkeyRecording;
+  }, [activeHotkeyRecording]);
+
+  const customHotkeysRef = useRef(customHotkeys);
+  useEffect(() => {
+    customHotkeysRef.current = customHotkeys;
+    localStorage.setItem('autosave_custom_hotkeys', JSON.stringify(customHotkeys));
+  }, [customHotkeys]);
+
+  // Visibility states for individual tracks
+  const [isVideoTrackVisible, setIsVideoTrackVisible] = useState(true);
+  const [isTextTrackVisible, setIsTextTrackVisible] = useState(true);
+  const [isDubTrackVisible, setIsDubTrackVisible] = useState(true);
+
   const [referenceAudioFile, setReferenceAudioFile] = useState<File | null>(null);
   const [referenceAudioBase64, setReferenceAudioBase64] = useState<string | null>(null);
+
+  // Extract original audio from video and build high-fidelity waveform peaks
+  useEffect(() => {
+    let active = true;
+    if (!videoFile) {
+      setVideoWaveformPeaks(null);
+      return;
+    }
+
+    const extractWaveform = async () => {
+      setIsExtractingVideoWaveform(true);
+      try {
+        if (!ffmpegRef.current) {
+          const ffmpeg = new FFmpeg();
+          const baseURL = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/esm';
+          await ffmpeg.load({
+            coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript'),
+            wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm'),
+          });
+          ffmpegRef.current = ffmpeg;
+        }
+
+        if (!active) return;
+        const ffmpeg = ffmpegRef.current;
+        const inputName = 'input_waveform' + (videoFile.name.substring(videoFile.name.lastIndexOf('.')) || '.mp4');
+        const outputName = 'waveform_extracted.wav';
+
+        await ffmpeg.writeFile(inputName, await fetchFile(videoFile));
+        
+        // Extract low-quality audio to a mono 8kHz WAV to keep memory & processing low
+        await ffmpeg.exec([
+          '-i', inputName,
+          '-vn',
+          '-ac', '1',
+          '-ar', '8000',
+          '-y',
+          outputName
+        ]);
+
+        if (!active) return;
+        const data = await ffmpeg.readFile(outputName);
+        const audioBlob = new Blob([data as any], { type: 'audio/wav' });
+        const arrayBuffer = await audioBlob.arrayBuffer();
+
+        const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
+        const buffer = await audioCtx.decodeAudioData(arrayBuffer);
+        const channelData = buffer.getChannelData(0);
+
+        // Generate ~15 peaks per second of video, up to 3000 peaks max
+        const samples = Math.min(3000, Math.max(200, Math.floor(buffer.duration * 15)));
+        const blockSize = Math.floor(channelData.length / samples);
+        const peaks: number[] = [];
+
+        for (let i = 0; i < samples; i++) {
+          let sum = 0;
+          const startIdx = i * blockSize;
+          const endIdx = Math.min(channelData.length, startIdx + blockSize);
+          if (blockSize > 0) {
+            for (let j = startIdx; j < endIdx; j++) {
+              const v = channelData[j];
+              sum += v * v;
+            }
+            peaks.push(Math.sqrt(sum / (endIdx - startIdx)));
+          } else {
+            peaks.push(0);
+          }
+        }
+        await audioCtx.close();
+
+        // Normalize
+        const max = Math.max(...peaks) || 1;
+        const norm = peaks.map((p) => Math.pow(p / max, 0.75));
+
+        if (active) {
+          setVideoWaveformPeaks(norm);
+        }
+
+        // Clean up virtual files
+        try {
+          await ffmpeg.deleteFile(inputName);
+          await ffmpeg.deleteFile(outputName);
+        } catch (e) {
+          console.warn("Could not delete temp ffmpeg waveform files:", e);
+        }
+
+      } catch (err) {
+        console.warn("Could not extract video audio for timeline waveform overlay:", err);
+      } finally {
+        if (active) {
+          setIsExtractingVideoWaveform(false);
+        }
+      }
+    };
+
+    extractWaveform();
+
+    return () => {
+      active = false;
+    };
+  }, [videoFile]);
 
   const [showShortcuts, setShowShortcuts] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
@@ -1846,7 +2121,9 @@ export default function App() {
       }
 
       activeSubIdsThisTick.add(clip.id);
-      const expectedTimeInFile = (time - clip.startTime) + clip.audioTrimStart;
+      
+      const speedMult = clip.speedMultiplier || 1.0;
+      const expectedTimeInFile = (time - clip.startTime) * speedMult + clip.audioTrimStart;
       let audio = activeAudioRefs.current.get(clip.id);
 
       if (!audio) {
@@ -1856,14 +2133,15 @@ export default function App() {
           clipEnd: clip.endTime,
           timelineCurrentTime: time,
           offset: time - clip.startTime,
+          playbackRateMultiplier: speedMult,
           playheadPx: (time * zoomLevel).toFixed(1),
           waveformLeftPx: (clip.startTime * zoomLevel).toFixed(1),
         });
 
         const newAudio = new Audio(clip.audioUrl);
         newAudio.currentTime = expectedTimeInFile;
-        newAudio.playbackRate = playbackRate;
-        newAudio.volume = dubVolume;
+        newAudio.playbackRate = playbackRate * speedMult;
+        newAudio.volume = isDubTrackVisible ? dubVolume : 0;
         if (!isPaused && expectedTimeInFile < clip.audioTrimEnd) {
           safePlay(newAudio);
         }
@@ -1876,11 +2154,13 @@ export default function App() {
           safePlay(audio);
         }
         
-        if (Math.abs(audio.playbackRate - playbackRate) > 0.01) {
-          audio.playbackRate = playbackRate;
+        const targetRate = playbackRate * speedMult;
+        if (Math.abs(audio.playbackRate - targetRate) > 0.01) {
+          audio.playbackRate = targetRate;
         }
-        if (Math.abs(audio.volume - dubVolume) > 0.01) {
-          audio.volume = dubVolume;
+        const targetVol = isDubTrackVisible ? dubVolume : 0;
+        if (Math.abs(audio.volume - targetVol) > 0.01) {
+          audio.volume = targetVol;
         }
 
         const drift = Math.abs(audio.currentTime - expectedTimeInFile);
@@ -1904,19 +2184,22 @@ export default function App() {
         activeAudioRefs.current.delete(id);
       }
     });
-  }, [audioClips, dubVolume, safePlay, zoomLevel]);
+  }, [audioClips, dubVolume, isDubTrackVisible, safePlay, zoomLevel]);
 
   useEffect(() => {
     if (videoRef.current) {
-        videoRef.current.volume = videoVolume;
+        const hasActiveDub = activeAudioRefs.current.size > 0;
+        const targetMultiplier = (isDuckingEnabled && hasActiveDub) ? duckingFactor : 1.0;
+        const targetVol = isVideoTrackVisible ? (videoVolume * targetMultiplier) : 0;
+        videoRef.current.volume = targetVol;
     }
-  }, [videoVolume]);
+  }, [videoVolume, isVideoTrackVisible, isDuckingEnabled, duckingFactor]);
 
   useEffect(() => {
     activeAudioRefs.current.forEach(audio => {
-      audio.volume = dubVolume;
+      audio.volume = isDubTrackVisible ? dubVolume : 0;
     });
-  }, [dubVolume]);
+  }, [dubVolume, isDubTrackVisible]);
 
   const maxEndTime = useMemo(() => {
     if (subtitles.length === 0) return 0;
@@ -2014,9 +2297,13 @@ export default function App() {
         // This will be picked up by the next setTimelineCurrentTime if we just use 'time'
       }
       
-      // Update video volume
-      if (video.volume !== videoVolume) {
-        video.volume = videoVolume;
+      // Update video volume with auto-ducking support
+      const hasActiveDub = activeAudioRefs.current.size > 0;
+      const appliedMultiplier = (isDuckingEnabled && hasActiveDub) ? duckingFactor : 1.0;
+      const baseVol = isVideoTrackVisible ? videoVolume : 0;
+      const targetVideoVol = baseVol * appliedMultiplier;
+      if (Math.abs(video.volume - targetVideoVol) > 0.01) {
+        video.volume = targetVideoVol;
       }
       
       if (isTimelinePlayingRef.current && isPaused) {
@@ -2090,11 +2377,96 @@ export default function App() {
     }
   }, [playTimeline, stopTimeline]);
 
+  const toggleVideoTrackVis = useCallback(() => {
+    setIsVideoTrackVisible(prev => !prev);
+  }, []);
+
+  const toggleTextTrackVis = useCallback(() => {
+    setIsTextTrackVisible(prev => !prev);
+  }, []);
+
+  const toggleDubTrackVis = useCallback(() => {
+    setIsDubTrackVisible(prev => !prev);
+  }, []);
+
+  const jumpToSubtitleGroup = useCallback((direction: 'prev' | 'next') => {
+    if (subtitles.length === 0) return;
+    
+    const currentTime = timelineCurrentTime;
+    let currentIndex = subtitles.findIndex(s => currentTime >= s.startTime && currentTime <= s.endTime);
+    if (currentIndex === -1) {
+      currentIndex = subtitles.findIndex(s => s.startTime > currentTime);
+      if (currentIndex === -1) currentIndex = subtitles.length - 1;
+    }
+    
+    const currentSub = subtitles[currentIndex];
+    const currentSpeakerId = currentSub?.speakerId || 'Default Speaker';
+    
+    if (direction === 'next') {
+      const nextGroupSub = subtitles.slice(currentIndex + 1).find(s => (s.speakerId || 'Default Speaker') !== currentSpeakerId);
+      if (nextGroupSub) {
+        handleTimelineScrub(nextGroupSub.startTime);
+      } else {
+        const firstDiffSub = subtitles.find(s => (s.speakerId || 'Default Speaker') !== currentSpeakerId);
+        if (firstDiffSub) {
+          handleTimelineScrub(firstDiffSub.startTime);
+        }
+      }
+    } else {
+      const prevSubtitles = [...subtitles].slice(0, currentIndex).reverse();
+      const prevGroupSub = prevSubtitles.find(s => (s.speakerId || 'Default Speaker') !== currentSpeakerId);
+      if (prevGroupSub) {
+        const firstInGroup = subtitles.find(s => s.id === prevGroupSub.id);
+        if (firstInGroup) {
+          handleTimelineScrub(firstInGroup.startTime);
+        }
+      } else {
+        const lastDiffSub = [...subtitles].reverse().find(s => (s.speakerId || 'Default Speaker') !== currentSpeakerId);
+        if (lastDiffSub) {
+          handleTimelineScrub(lastDiffSub.startTime);
+        }
+      }
+    }
+  }, [subtitles, timelineCurrentTime, handleTimelineScrub]);
+
   // Refs for keydown listener to avoid frequent re-subscribing
-  const stateRef = useRef({ togglePlayback, handleTimelineScrub, subtitles, timelineCurrentTime, videoRef, isPlaying });
+  const stateRef = useRef({ 
+    togglePlayback, 
+    handleTimelineScrub, 
+    subtitles, 
+    timelineCurrentTime, 
+    videoRef, 
+    isPlaying,
+    toggleVideoTrackVis,
+    toggleTextTrackVis,
+    toggleDubTrackVis,
+    jumpToSubtitleGroup
+  });
   useEffect(() => {
-    stateRef.current = { togglePlayback, handleTimelineScrub, subtitles, timelineCurrentTime, videoRef, isPlaying };
-  }, [togglePlayback, handleTimelineScrub, subtitles, timelineCurrentTime, videoRef, isPlaying]);
+    stateRef.current = { 
+      togglePlayback, 
+      handleTimelineScrub, 
+      subtitles, 
+      timelineCurrentTime, 
+      videoRef, 
+      isPlaying,
+      toggleVideoTrackVis,
+      toggleTextTrackVis,
+      toggleDubTrackVis,
+      jumpToSubtitleGroup
+    };
+  }, [
+    togglePlayback, 
+    handleTimelineScrub, 
+    subtitles, 
+    timelineCurrentTime, 
+    videoRef, 
+    isPlaying,
+    toggleVideoTrackVis,
+    toggleTextTrackVis,
+    toggleDubTrackVis,
+    jumpToSubtitleGroup
+  ]);
 
 
 
@@ -2306,13 +2678,37 @@ export default function App() {
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      // If we are recording a hotkey:
+      if (activeHotkeyRecordingRef.current) {
+        e.preventDefault();
+        e.stopPropagation();
+        const actionId = activeHotkeyRecordingRef.current;
+        setCustomHotkeys(prev => ({
+          ...prev,
+          [actionId]: e.code
+        }));
+        setActiveHotkeyRecording(null);
+        return;
+      }
+
       if (document.activeElement instanceof HTMLInputElement || 
           document.activeElement instanceof HTMLTextAreaElement ||
           (document.activeElement as HTMLElement)?.isContentEditable) {
         return;
       }
       
-      const { togglePlayback, handleTimelineScrub, subtitles, timelineCurrentTime } = stateRef.current;
+      const { 
+        togglePlayback, 
+        handleTimelineScrub, 
+        subtitles, 
+        timelineCurrentTime,
+        toggleVideoTrackVis,
+        toggleTextTrackVis,
+        toggleDubTrackVis,
+        jumpToSubtitleGroup
+      } = stateRef.current;
+
+      const hotkeys = customHotkeysRef.current;
 
       if (e.code === 'Space') {
         e.preventDefault();
@@ -2357,6 +2753,21 @@ export default function App() {
           e.preventDefault();
           setZoomLevel(prev => Math.max(2, prev / 1.2));
         }
+      } else if (e.code === hotkeys.toggleVideoTrack) {
+        e.preventDefault();
+        toggleVideoTrackVis();
+      } else if (e.code === hotkeys.toggleTextTrack) {
+        e.preventDefault();
+        toggleTextTrackVis();
+      } else if (e.code === hotkeys.toggleDubTrack) {
+        e.preventDefault();
+        toggleDubTrackVis();
+      } else if (e.code === hotkeys.jumpPrevSpeakerGroup) {
+        e.preventDefault();
+        jumpToSubtitleGroup('prev');
+      } else if (e.code === hotkeys.jumpNextSpeakerGroup) {
+        e.preventDefault();
+        jumpToSubtitleGroup('next');
       }
     };
     
@@ -2701,8 +3112,22 @@ export default function App() {
     setShowSettings(false);
   };
 
-  // Generate audio for a single subtitle
+  // Generate audio for a single subtitle with automatic volume normalization
   const generateSubtitleAudio = async (sub: Subtitle): Promise<Blob | null> => {
+    const rawBlob = await generateRawSubtitleAudio(sub);
+    if (!rawBlob) return null;
+    if (isNormalizeEnabled) {
+      try {
+        return await normalizeAudioBlob(rawBlob);
+      } catch (normErr) {
+        console.warn("Could not normalize generated audio clip, using fallback:", normErr);
+      }
+    }
+    return rawBlob;
+  };
+
+  // Generate audio for a single subtitle (Raw generation)
+  const generateRawSubtitleAudio = async (sub: Subtitle): Promise<Blob | null> => {
     try {
       const speaker = speakers.find(s => s.id === sub.speakerId);
       const engineToUse = (speaker?.engine && speaker.engine !== 'default') ? speaker.engine : ((!sub.engine || sub.engine === 'default') ? ttsEngine : sub.engine);
@@ -3162,6 +3587,8 @@ export default function App() {
     }
 
     const audio = new Audio(sub.audioUrl);
+    audio.volume = isDubTrackVisible ? dubVolume : 0;
+    audio.playbackRate = sub.speedMultiplier || 1.0;
     previewAudioRef.current = audio;
     setPreviewingId(sub.id);
 
@@ -3248,6 +3675,8 @@ export default function App() {
          previewAudioRef.current.pause();
        }
        const audio = new Audio(url);
+       audio.volume = isDubTrackVisible ? dubVolume : 0;
+       audio.playbackRate = sub.speedMultiplier || 1.0;
        previewAudioRef.current = audio;
        setPreviewingId(sub.id);
        audio.onended = () => setPreviewingId(null);
@@ -3344,6 +3773,8 @@ export default function App() {
         // Auto-play the audio snippet we just generated, and wait for it to finish!
         if (previewAudioRef.current) previewAudioRef.current.pause();
         const audio = new Audio(url);
+        audio.volume = isDubTrackVisible ? dubVolume : 0;
+        audio.playbackRate = subtitles[i].speedMultiplier || 1.0;
         previewAudioRef.current = audio;
         setPreviewingId(subtitles[i].id);
 
@@ -3625,63 +4056,122 @@ export default function App() {
             <motion.div 
               initial={{ opacity: 0, scale: 0.9, y: 20 }}
               animate={{ opacity: 1, scale: 1, y: 0 }}
-              className="bg-slate-900 border border-slate-800 rounded-xl shadow-2xl w-full max-w-lg overflow-hidden" 
+              className="bg-slate-900 border border-slate-800 rounded-xl shadow-2xl w-full max-w-2xl overflow-hidden" 
               onClick={e => e.stopPropagation()}
             >
               <div className="p-4 border-b border-slate-800 flex items-center justify-between bg-slate-900/50">
                 <div className="flex items-center gap-2">
                   <HelpCircle className="w-5 h-5 text-amber-500" />
-                  <h3 className="text-lg font-bold text-white">Keyboard Shortcuts</h3>
+                  <h3 className="text-lg font-bold text-white">Keyboard Shortcuts & Hotkeys</h3>
                 </div>
                 <button onClick={() => setShowShortcuts(false)} className="p-1 hover:bg-slate-800 rounded-full transition-colors text-slate-400">
                   <X className="w-5 h-5" />
                 </button>
               </div>
-              <div className="p-6 grid grid-cols-2 gap-6 text-sm">
-                <div className="space-y-4">
-                  <h4 className="text-xs font-bold text-slate-500 uppercase tracking-widest">Playback</h4>
-                  <div className="flex justify-between items-center bg-slate-950/50 p-2 rounded border border-slate-800/50">
-                    <span className="text-slate-400">Play / Pause</span>
-                    <kbd className="px-2 py-1 bg-slate-800 rounded text-amber-500 font-mono text-xs shadow-sm shadow-black/40 border border-slate-700/50">Space</kbd>
+              <div className="p-6 max-h-[80vh] overflow-y-auto space-y-6">
+                <div className="grid grid-cols-2 gap-6 text-sm">
+                  <div className="space-y-4">
+                    <h4 className="text-xs font-bold text-slate-500 uppercase tracking-widest">Playback</h4>
+                    <div className="flex justify-between items-center bg-slate-950/50 p-2 rounded border border-slate-800/50">
+                      <span className="text-slate-400">Play / Pause</span>
+                      <kbd className="px-2 py-1 bg-slate-800 rounded text-amber-500 font-mono text-xs shadow-sm shadow-black/40 border border-slate-700/50">Space</kbd>
+                    </div>
+                    <div className="flex justify-between items-center bg-slate-950/50 p-2 rounded border border-slate-800/50">
+                      <span className="text-slate-400">Step Back</span>
+                      <kbd className="px-2 py-1 bg-slate-800 rounded text-amber-500 font-mono text-xs shadow-sm shadow-black/40 border border-slate-700/50">←</kbd>
+                    </div>
+                    <div className="flex justify-between items-center bg-slate-950/50 p-2 rounded border border-slate-800/50">
+                      <span className="text-slate-400">Step Forward</span>
+                      <kbd className="px-2 py-1 bg-slate-800 rounded text-amber-500 font-mono text-xs shadow-sm shadow-black/40 border border-slate-700/50">→</kbd>
+                    </div>
+                    <div className="flex justify-between items-center bg-slate-950/50 p-2 rounded border border-slate-800/50">
+                      <span className="text-slate-400">1s Jump</span>
+                      <kbd className="px-2 py-1 bg-slate-800 rounded text-amber-500 font-mono text-xs shadow-sm shadow-black/40 border border-slate-700/50">Shift + ←/→</kbd>
+                    </div>
                   </div>
-                  <div className="flex justify-between items-center bg-slate-950/50 p-2 rounded border border-slate-800/50">
-                    <span className="text-slate-400">Step Back</span>
-                    <kbd className="px-2 py-1 bg-slate-800 rounded text-amber-500 font-mono text-xs shadow-sm shadow-black/40 border border-slate-700/50">←</kbd>
+                  <div className="space-y-4">
+                    <h4 className="text-xs font-bold text-slate-500 uppercase tracking-widest">Editor</h4>
+                    <div className="flex justify-between items-center bg-slate-950/50 p-2 rounded border border-slate-800/50">
+                      <span className="text-slate-400">Prev Subtitle</span>
+                      <kbd className="px-2 py-1 bg-slate-800 rounded text-amber-500 font-mono text-xs shadow-sm shadow-black/40 border border-slate-700/50">↑</kbd>
+                    </div>
+                    <div className="flex justify-between items-center bg-slate-950/50 p-2 rounded border border-slate-800/50">
+                      <span className="text-slate-400">Next Subtitle</span>
+                      <kbd className="px-2 py-1 bg-slate-800 rounded text-amber-500 font-mono text-xs shadow-sm shadow-black/40 border border-slate-700/50">↓</kbd>
+                    </div>
+                    <div className="flex justify-between items-center bg-slate-950/50 p-2 rounded border border-slate-800/50">
+                      <span className="text-slate-400">Delete Clip</span>
+                      <kbd className="px-2 py-1 bg-slate-800 rounded text-amber-500 font-mono text-xs shadow-sm shadow-black/40 border border-slate-700/50">Del / BS</kbd>
+                    </div>
+                    <div className="flex justify-between items-center bg-slate-950/50 p-2 rounded border border-slate-800/50">
+                      <span className="text-slate-400">Keyboard help</span>
+                      <kbd className="px-2 py-1 bg-slate-800 rounded text-amber-500 font-mono text-xs shadow-sm shadow-black/40 border border-slate-700/50">?</kbd>
+                    </div>
                   </div>
-                  <div className="flex justify-between items-center bg-slate-950/50 p-2 rounded border border-slate-800/50">
-                    <span className="text-slate-400">Step Forward</span>
-                    <kbd className="px-2 py-1 bg-slate-800 rounded text-amber-500 font-mono text-xs shadow-sm shadow-black/40 border border-slate-700/50">→</kbd>
-                  </div>
-                  <div className="flex justify-between items-center bg-slate-950/50 p-2 rounded border border-slate-800/50">
-                    <span className="text-slate-400">1s Jump</span>
-                    <kbd className="px-2 py-1 bg-slate-800 rounded text-amber-500 font-mono text-xs shadow-sm shadow-black/40 border border-slate-700/50">Shift + ←/→</kbd>
+                  <div className="col-span-2 space-y-4 border-t border-slate-850 pt-4">
+                    <h4 className="text-xs font-bold text-slate-500 uppercase tracking-widest">Timeline Navigation</h4>
+                    <div className="flex justify-between items-center bg-slate-950/50 p-2 rounded border border-slate-800/50 text-xs">
+                      <span className="text-slate-400">Zoom Canvas</span>
+                      <kbd className="px-2 py-1 bg-slate-800 rounded text-amber-500 font-mono text-xs shadow-sm shadow-black/40 border border-slate-700/50">Ctrl / ⌘ + (+/-)</kbd>
+                    </div>
                   </div>
                 </div>
-                <div className="space-y-4">
-                  <h4 className="text-xs font-bold text-slate-500 uppercase tracking-widest">Editor</h4>
-                  <div className="flex justify-between items-center bg-slate-950/50 p-2 rounded border border-slate-800/50">
-                    <span className="text-slate-400">Prev Subtitle</span>
-                    <kbd className="px-2 py-1 bg-slate-800 rounded text-amber-500 font-mono text-xs shadow-sm shadow-black/40 border border-slate-700/50">↑</kbd>
+
+                {/* Customizable Hotkeys section */}
+                <div className="border-t border-slate-800 pt-5 space-y-4">
+                  <div className="flex justify-between items-center">
+                    <div className="space-y-1">
+                      <h4 className="text-xs font-bold text-slate-400 uppercase tracking-widest flex items-center gap-2">
+                        <Settings className="w-4 h-4 text-amber-500 animate-[spin_5s_linear_infinite]" />
+                        Manage Custom Hotkeys
+                      </h4>
+                      <p className="text-[11px] text-slate-500">Customize keyboard controls for dynamic tracks and subtitle speech groups</p>
+                    </div>
+                    <button 
+                      onClick={() => setCustomHotkeys({
+                        toggleVideoTrack: 'KeyQ',
+                        toggleTextTrack: 'KeyW',
+                        toggleDubTrack: 'KeyE',
+                        jumpPrevSpeakerGroup: 'BracketLeft',
+                        jumpNextSpeakerGroup: 'BracketRight',
+                      })}
+                      className="text-[10px] text-amber-500 hover:text-amber-400 font-bold tracking-wider uppercase cursor-pointer flex items-center gap-1 bg-amber-500/10 px-2 py-1 rounded border border-amber-500/20 hover:bg-amber-500/20 active:scale-95 transition-all select-none"
+                    >
+                      Reset Defaults
+                    </button>
                   </div>
-                  <div className="flex justify-between items-center bg-slate-950/50 p-2 rounded border border-slate-800/50">
-                    <span className="text-slate-400">Next Subtitle</span>
-                    <kbd className="px-2 py-1 bg-slate-800 rounded text-amber-500 font-mono text-xs shadow-sm shadow-black/40 border border-slate-700/50">↓</kbd>
+                  
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pb-2">
+                    {[
+                      { id: 'toggleVideoTrack', label: 'Toggle Video Track Vis' },
+                      { id: 'toggleTextTrack', label: 'Toggle Subtitles Track Vis' },
+                      { id: 'toggleDubTrack', label: 'Toggle Dub Audio Track Vis' },
+                      { id: 'jumpPrevSpeakerGroup', label: 'Jump Prev Subtitle Group' },
+                      { id: 'jumpNextSpeakerGroup', label: 'Jump Next Subtitle Group' },
+                    ].map(item => {
+                      const isRecording = activeHotkeyRecording === item.id;
+                      const currentKey = customHotkeys[item.id];
+                      return (
+                        <div key={item.id} className="flex justify-between items-center bg-slate-950/60 p-2.5 rounded-lg border border-slate-800/80 hover:border-slate-700/50 transition-colors">
+                          <span className="text-xs font-medium text-slate-300">{item.label}</span>
+                          <button
+                            onClick={() => setActiveHotkeyRecording(isRecording ? null : item.id)}
+                            className={`px-3 py-1.5 rounded text-xs font-mono select-none font-bold tracking-wide transition-all ${
+                              isRecording 
+                                ? 'bg-amber-500 text-slate-950 animate-pulse font-extrabold ring-2 ring-amber-400/50 duration-700' 
+                                : 'bg-slate-800 hover:bg-slate-755 text-amber-500 border border-slate-700/60 hover:border-amber-500/30 active:scale-95'
+                            }`}
+                            title="Click to rebind this keyboard shortcut"
+                          >
+                            {isRecording ? 'RECORDING...' : formatKeyCode(currentKey)}
+                          </button>
+                        </div>
+                      );
+                    })}
                   </div>
-                  <div className="flex justify-between items-center bg-slate-950/50 p-2 rounded border border-slate-800/50">
-                    <span className="text-slate-400">Delete Clip</span>
-                    <kbd className="px-2 py-1 bg-slate-800 rounded text-amber-500 font-mono text-xs shadow-sm shadow-black/40 border border-slate-700/50">Del / BS</kbd>
-                  </div>
-                  <div className="flex justify-between items-center bg-slate-950/50 p-2 rounded border border-slate-800/50">
-                    <span className="text-slate-400">Keyboard help</span>
-                    <kbd className="px-2 py-1 bg-slate-800 rounded text-amber-500 font-mono text-xs shadow-sm shadow-black/40 border border-slate-700/50">?</kbd>
-                  </div>
-                </div>
-                <div className="col-span-2 space-y-4 pt-2">
-                   <h4 className="text-xs font-bold text-slate-500 uppercase tracking-widest">Timeline</h4>
-                   <div className="flex justify-between items-center bg-slate-950/50 p-2 rounded border border-slate-800/50">
-                    <span className="text-slate-400">Zoom Canvas</span>
-                    <kbd className="px-2 py-1 bg-slate-800 rounded text-amber-500 font-mono text-xs shadow-sm shadow-black/40 border border-slate-700/50">Ctrl / ⌘ + (+/-)</kbd>
-                  </div>
+                  <p className="text-[10px] text-slate-500 leading-relaxed italic bg-slate-950/30 p-2 border border-slate-850 rounded">
+                    Tip: Click any shortcut button above, then press any key on your keyboard to instantly rebind its action.
+                  </p>
                 </div>
               </div>
               <div className="p-4 bg-slate-950/50 border-t border-slate-800 text-xs text-slate-500 text-center italic">
@@ -4165,6 +4655,21 @@ export default function App() {
                         networkState: v.networkState
                       });
                       setVideoDuration(v.duration || 0);
+                      // Apply initial volume immediately
+                      const hasActiveDub = activeAudioRefs.current.size > 0;
+                      const targetMultiplier = (isDuckingEnabled && hasActiveDub) ? duckingFactor : 1.0;
+                      const targetVol = isVideoTrackVisible ? (videoVolume * targetMultiplier) : 0;
+                      v.volume = targetVol;
+                    }}
+                    onPlay={() => {
+                      if (!isTimelinePlayingRef.current) {
+                        playTimeline();
+                      }
+                    }}
+                    onPause={() => {
+                      if (isTimelinePlayingRef.current) {
+                        stopTimeline();
+                      }
                     }}
                     onLoadStart={() => console.log("Video Load Start")}
                     onCanPlay={() => console.log("Video Can Play")}
@@ -4451,7 +4956,7 @@ export default function App() {
                     >
                       {videoVolume === 0 ? <VolumeX className="w-4 h-4" /> : <Volume1 className="w-4 h-4" />}
                     </button>
-                    <span className="text-[9px] text-slate-600 hidden lg:inline-block w-10">Original</span>
+                    <span className="text-[9px] text-slate-500 hidden lg:inline-block w-10 font-semibold select-none">Original</span>
                     <input 
                       type="range" 
                       min="0" 
@@ -4460,7 +4965,7 @@ export default function App() {
                       value={videoVolume}
                       onChange={(e) => setVideoVolume(parseFloat(e.target.value))}
                       className="w-20 h-1.5 accent-blue-500 cursor-pointer rounded-full" 
-                      title="Original volume" 
+                      title="Original sound" 
                     />
                   </div>
                   <div className="w-px h-5 bg-slate-700/40" />
@@ -4472,7 +4977,7 @@ export default function App() {
                     >
                       {dubVolume === 0 ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
                     </button>
-                    <span className="text-[9px] text-slate-600 hidden lg:inline-block w-8">Dub</span>
+                    <span className="text-[9px] text-slate-500 hidden lg:inline-block w-8 font-semibold select-none">Dub</span>
                     <input 
                       type="range" 
                       min="0" 
@@ -4483,6 +4988,43 @@ export default function App() {
                       className="w-20 h-1.5 accent-amber-500 cursor-pointer rounded-full" 
                       title="Dub volume" 
                     />
+                  </div>
+                  <div className="w-px h-5 bg-slate-700/40" />
+                  <div className="flex items-center gap-2">
+                    <button 
+                      onClick={() => setIsDuckingEnabled(!isDuckingEnabled)} 
+                      className={`px-2 py-1 rounded text-[9px] font-bold uppercase transition-all tracking-wide flex items-center gap-1 cursor-pointer select-none active:scale-95 ${isDuckingEnabled ? 'bg-amber-500/15 text-amber-500 border border-amber-500/30' : 'bg-slate-850 text-slate-500 border border-slate-700/60 hover:text-slate-300'}`}
+                      title="Toggle Acoustic Auto-Ducking: dynamically lowers background video volume when speech active"
+                    >
+                      <span>🦆 Auto-Ducking</span>
+                      <span className={`w-1.5 h-1.5 rounded-full ${isDuckingEnabled ? 'bg-amber-500' : 'bg-slate-600'}`}></span>
+                    </button>
+                    {isDuckingEnabled && (
+                      <div className="flex items-center gap-1 animate-in fade-in zoom-in-95 duration-150">
+                        <input 
+                          type="range" 
+                          min="0.05" 
+                          max="0.80" 
+                          step="0.05" 
+                          value={duckingFactor}
+                          onChange={(e) => setDuckingFactor(parseFloat(e.target.value))}
+                          className="w-14 h-1 accent-amber-500 cursor-pointer rounded-full" 
+                          title={`Ducking depth: Scale background music down to ${(duckingFactor * 100).toFixed(0)}% when speaker talks`} 
+                        />
+                        <span className="text-[9px] font-mono font-bold text-amber-500/80 w-6">{(duckingFactor * 100).toFixed(0)}%</span>
+                      </div>
+                    )}
+                  </div>
+                  <div className="w-px h-5 bg-slate-700/40" />
+                  <div className="flex items-center gap-2">
+                    <button 
+                      onClick={() => setIsNormalizeEnabled(!isNormalizeEnabled)} 
+                      className={`px-2 py-1 rounded text-[9px] font-bold uppercase transition-all tracking-wide flex items-center gap-1 cursor-pointer select-none active:scale-95 ${isNormalizeEnabled ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30' : 'bg-slate-850 text-slate-500 border border-slate-700/60 hover:text-slate-300'}`}
+                      title="Toggle Auto Normalization: automatically normalizes peak levels of generated dub clips to match consistent reference volume levels"
+                    >
+                      <span>🔊 Auto-Normalize</span>
+                      <span className={`w-1.5 h-1.5 rounded-full ${isNormalizeEnabled ? 'bg-emerald-500' : 'bg-slate-600'}`}></span>
+                    </button>
                   </div>
                 </div>
 
@@ -4589,128 +5131,176 @@ export default function App() {
 
                 <div className="flex flex-col">
                   {/* Video Track - Improved */}
-                  <div className="h-12 border-b border-slate-700/40 relative group flex items-center hover:bg-slate-800/40 transition-colors">
-                    <div className="sticky left-0 z-20 h-full bg-gradient-to-r from-slate-950 to-slate-950/70 border-r border-slate-700 px-3 flex items-center gap-2.5 w-32 shrink-0 select-none">
-                      <div className="w-2 h-2 rounded-full bg-slate-500 shrink-0 shadow-lg shadow-slate-500/30" />
-                      <Film className="w-4 h-4 text-slate-400 shrink-0" />
-                      <span className="text-[11px] font-bold text-slate-300 uppercase tracking-wider truncate">Video</span>
+                  {!isVideoTrackVisible ? (
+                    <div className="h-7 border-b border-slate-700/20 bg-slate-900/40 hover:bg-slate-800/20 flex items-center justify-between px-3 text-slate-500 text-[10px] select-none transition-all">
+                      <div className="flex items-center gap-2">
+                        <Film className="w-3.5 h-3.5 text-slate-600" />
+                        <span className="font-bold uppercase tracking-wider text-[9px] text-slate-500">Video Track Hidden</span>
+                        <kbd className="px-1 py-0.5 bg-slate-950/60 text-[8px] rounded font-mono text-slate-500 border border-slate-800/80">{formatKeyCode(customHotkeys.toggleVideoTrack)}</kbd>
+                      </div>
+                      <button 
+                        onClick={() => setIsVideoTrackVisible(true)}
+                        className="text-[9px] text-amber-500 hover:text-amber-400 font-bold uppercase cursor-pointer"
+                      >
+                        Show
+                      </button>
                     </div>
-                    <div className="relative flex-1 h-10 mx-2">
-                       <div
-                         className="h-full rounded-md relative overflow-hidden flex items-center pl-3 pointer-events-none border border-slate-700/20 shadow-inner"
-                         style={{
-                           width: `${videoDuration * pixelsPerSecond}px`,
-                           minWidth: '4px',
-                           background: 'linear-gradient(135deg, rgba(71,85,105,0.4) 0%, rgba(51,65,85,0.3) 100%)',
-                         }}
-                       >
-                         <div className="absolute inset-0 opacity-5" style={{ backgroundImage: 'repeating-linear-gradient(90deg, transparent, transparent 40px, rgba(255,255,255,0.5) 40px, rgba(255,255,255,0.5) 41px)' }}></div>
-                         <Film className="w-3 h-3 text-slate-400 shrink-0 mr-2" />
-                         <span className="text-[10px] font-medium text-slate-400 truncate z-10">{videoFile ? videoFile.name : 'No video loaded'}</span>
-                       </div>
+                  ) : (
+                    <div className="h-12 border-b border-slate-700/40 relative group flex items-center hover:bg-slate-800/40 transition-colors">
+                      <div className="sticky left-0 z-20 h-full bg-gradient-to-r from-slate-950 to-slate-950/70 border-r border-slate-700 px-3 flex items-center gap-2.5 w-32 shrink-0 select-none">
+                        <div className="w-2 h-2 rounded-full bg-slate-500 shrink-0 shadow-lg shadow-slate-500/30" />
+                        <Film className="w-4 h-4 text-slate-400 shrink-0" />
+                        <span className="text-[11px] font-bold text-slate-300 uppercase tracking-wider truncate">Video</span>
+                      </div>
+                      <div className="relative flex-1 h-10 mx-2">
+                         <div
+                           className="h-full rounded-md relative overflow-hidden flex items-center pl-3 pointer-events-none border border-slate-700/20 shadow-inner"
+                           style={{
+                             width: `${videoDuration * pixelsPerSecond}px`,
+                             minWidth: '4px',
+                             background: 'linear-gradient(135deg, rgba(71,85,105,0.4) 0%, rgba(51,65,85,0.3) 100%)',
+                           }}
+                         >
+                           <div className="absolute inset-0 opacity-5" style={{ backgroundImage: 'repeating-linear-gradient(90deg, transparent, transparent 40px, rgba(255,255,255,0.5) 40px, rgba(255,255,255,0.5) 41px)' }}></div>
+                           <Film className="w-3 h-3 text-slate-400 shrink-0 mr-2" />
+                           <span className="text-[10px] font-medium text-slate-400 truncate z-10">{videoFile ? videoFile.name : 'No video loaded'}</span>
+                         </div>
+                      </div>
                     </div>
-                  </div>
+                  )}
 
                   {/* Subtitles Track - Improved */}
-                  <div className="h-12 border-b border-slate-700/40 relative group flex items-center hover:bg-slate-800/40 transition-colors">
-                    <div className="sticky left-0 z-20 h-full bg-gradient-to-r from-slate-950 to-slate-950/70 border-r border-slate-700 px-3 flex items-center gap-2.5 w-32 shrink-0 select-none">
-                      <div className="w-2 h-2 rounded-full bg-amber-500 shrink-0 shadow-lg shadow-amber-500/40" />
-                      <FileText className="w-4 h-4 text-amber-400/70 shrink-0" />
-                      <div className="flex flex-col min-w-0">
-                        <span className="text-[11px] font-bold text-slate-300 uppercase tracking-wider truncate">Text</span>
-                        {subtitles.length > 0 && <span className="text-[8px] text-slate-500 font-medium">{subtitles.length} clips</span>}
+                  {!isTextTrackVisible ? (
+                    <div className="h-7 border-b border-slate-700/20 bg-slate-900/40 hover:bg-slate-800/20 flex items-center justify-between px-3 text-slate-500 text-[10px] select-none transition-all">
+                      <div className="flex items-center gap-2">
+                        <FileText className="w-3.5 h-3.5 text-slate-600" />
+                        <span className="font-bold uppercase tracking-wider text-[9px] text-slate-500">Subtitles Track Hidden</span>
+                        <kbd className="px-1 py-0.5 bg-slate-950/60 text-[8px] rounded font-mono text-slate-500 border border-slate-800/80">{formatKeyCode(customHotkeys.toggleTextTrack)}</kbd>
+                      </div>
+                      <button 
+                        onClick={() => setIsTextTrackVisible(true)}
+                        className="text-[9px] text-amber-500 hover:text-amber-400 font-bold uppercase cursor-pointer"
+                      >
+                        Show
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="h-12 border-b border-slate-700/40 relative group flex items-center hover:bg-slate-800/40 transition-colors">
+                      <div className="sticky left-0 z-20 h-full bg-gradient-to-r from-slate-950 to-slate-950/70 border-r border-slate-700 px-3 flex items-center gap-2.5 w-32 shrink-0 select-none">
+                        <div className="w-2 h-2 rounded-full bg-amber-500 shrink-0 shadow-lg shadow-amber-500/40" />
+                        <FileText className="w-4 h-4 text-amber-400/70 shrink-0" />
+                        <div className="flex flex-col min-w-0">
+                          <span className="text-[11px] font-bold text-slate-300 uppercase tracking-wider truncate">Text</span>
+                          {subtitles.length > 0 && <span className="text-[8px] text-slate-500 font-medium">{subtitles.length} clips</span>}
+                        </div>
+                      </div>
+                      <div className="relative flex-1 h-full">
+                        {visibleSubtitles.map((sub) => {
+                          const isDragging = !!(dragVisuals && dragVisuals.id === sub.id);
+                          const sTime = isDragging ? dragVisuals!.startTime : sub.startTime;
+                          const eTime = isDragging ? dragVisuals!.endTime : sub.endTime;
+
+                          return (
+                                 <TimelineClip 
+                                    key={`sub-${sub.id}`}
+                                    id={sub.id}
+                                    type="subtitle"
+                                    startTime={sTime}
+                                    endTime={eTime}
+                                    text={sub.text}
+                                    zoomLevel={pixelsPerSecond}
+                                    isActive={timelineCurrentTime >= sTime && timelineCurrentTime <= eTime}
+                                    isSelected={selectedClipId?.id === sub.id && selectedClipId?.type === 'subtitle'}
+                                    isDragging={isDragging}
+                                    onSelect={() => {
+                                      setSelectedClipId({ id: sub.id, type: 'subtitle' });
+                                    }}
+                                    onDragStart={handleDragPointerDown}
+                                    onDragMove={handleDragPointerMove}
+                                    onDragEnd={handleDragPointerUp}
+                                    onAutoTrim={handleAutoTrim}
+                                    emotions={sub.emotions}
+                                  />
+                          );
+                        })}
                       </div>
                     </div>
-                    <div className="relative flex-1 h-full">
-                      {visibleSubtitles.map((sub) => {
-                        const isDragging = !!(dragVisuals && dragVisuals.id === sub.id);
-                        const sTime = isDragging ? dragVisuals!.startTime : sub.startTime;
-                        const eTime = isDragging ? dragVisuals!.endTime : sub.endTime;
-
-                        return (
-                               <TimelineClip 
-                                  key={`sub-${sub.id}`}
-                                  id={sub.id}
-                                  type="subtitle"
-                                  startTime={sTime}
-                                  endTime={eTime}
-                                  text={sub.text}
-                                  zoomLevel={pixelsPerSecond}
-                                  isActive={timelineCurrentTime >= sTime && timelineCurrentTime <= eTime}
-                                  isSelected={selectedClipId?.id === sub.id && selectedClipId?.type === 'subtitle'}
-                                  isDragging={isDragging}
-                                  onSelect={() => {
-                                    setSelectedClipId({ id: sub.id, type: 'subtitle' });
-                                  }}
-                                  onDragStart={handleDragPointerDown}
-                                  onDragMove={handleDragPointerMove}
-                                  onDragEnd={handleDragPointerUp}
-                                  onAutoTrim={handleAutoTrim}
-                                  emotions={sub.emotions}
-                                />
-                        );
-                      })}
-                    </div>
-                  </div>
+                  )}
 
                   {/* Dub Audio Track - Improved */}
-                  <div className="border-b border-slate-700/40 relative group flex items-center hover:bg-slate-800/40 transition-colors" style={{ height: `${Math.max(64, audioLanes.laneCount * 52)}px` }}>
-                    <div className="sticky left-0 z-20 h-full bg-gradient-to-r from-slate-950 to-slate-950/70 border-r border-slate-700 px-3 flex items-center gap-2.5 w-32 shrink-0 select-none">
-                      <div className="w-2 h-2 rounded-full bg-emerald-500 shrink-0 shadow-lg shadow-emerald-500/40" />
-                      <Music className="w-4 h-4 text-emerald-400/70 shrink-0" />
-                      <div className="flex flex-col min-w-0">
-                        <span className="text-[11px] font-bold text-slate-300 uppercase tracking-wider truncate">Dub</span>
-                        {audioClips.length > 0 && <span className="text-[8px] text-slate-500 font-medium">{audioClips.length} clips</span>}
+                  {!isDubTrackVisible ? (
+                    <div className="h-7 border-b border-slate-700/20 bg-slate-900/40 hover:bg-slate-800/20 flex items-center justify-between px-3 text-slate-500 text-[10px] select-none transition-all">
+                      <div className="flex items-center gap-2">
+                        <Music className="w-3.5 h-3.5 text-slate-600" />
+                        <span className="font-bold uppercase tracking-wider text-[9px] text-slate-500">Dub Audio Track Hidden</span>
+                        <kbd className="px-1 py-0.5 bg-slate-950/60 text-[8px] rounded font-mono text-slate-500 border border-slate-800/80">{formatKeyCode(customHotkeys.toggleDubTrack)}</kbd>
+                      </div>
+                      <button 
+                        onClick={() => setIsDubTrackVisible(true)}
+                        className="text-[9px] text-amber-500 hover:text-amber-400 font-bold uppercase cursor-pointer"
+                      >
+                        Show
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="border-b border-slate-700/40 relative group flex items-center hover:bg-slate-800/40 transition-colors" style={{ height: `${Math.max(64, audioLanes.laneCount * 52)}px` }}>
+                      <div className="sticky left-0 z-20 h-full bg-gradient-to-r from-slate-950 to-slate-950/70 border-r border-slate-700 px-3 flex items-center gap-2.5 w-32 shrink-0 select-none">
+                        <div className="w-2 h-2 rounded-full bg-emerald-500 shrink-0 shadow-lg shadow-emerald-500/40" />
+                        <Music className="w-4 h-4 text-emerald-400/70 shrink-0" />
+                        <div className="flex flex-col min-w-0">
+                          <span className="text-[11px] font-bold text-slate-300 uppercase tracking-wider truncate">Dub</span>
+                          {audioClips.length > 0 && <span className="text-[8px] text-slate-500 font-medium">{audioClips.length} clips</span>}
+                        </div>
+                      </div>
+                      <div className="relative flex-1 h-full">
+                        {audioClips.filter(clip => {
+                            const viewportStartTime = timelineScrollLeft / pixelsPerSecond;
+                            const viewportEndTime = (timelineScrollLeft + timelineViewportWidth) / pixelsPerSecond;
+                            const padding = 2;
+                            return (clip.startTime <= viewportEndTime + padding) && (clip.endTime >= viewportStartTime - padding);
+                        }).map((clip) => {
+                          const isDragging = !!(dragVisuals && dragVisuals.id === clip.id);
+                          const sTime = isDragging ? dragVisuals!.startTime : clip.startTime;
+                          const eTime = isDragging ? dragVisuals!.endTime : clip.endTime;
+                          const tStart = isDragging ? dragVisuals!.audioTrimStart : clip.audioTrimStart;
+                          const tEnd = isDragging ? dragVisuals!.audioTrimEnd : clip.audioTrimEnd;
+                          const lane = audioLanes.laneMap.get(clip.id) ?? 0;
+                          const laneHeight = 100 / audioLanes.laneCount;
+                          const laneTopPct = lane * laneHeight;
+
+                          return (
+                          <TimelineClip 
+                            key={`audio-${clip.id}`}
+                            id={clip.id}
+                            type="audio"
+                            startTime={sTime}
+                            endTime={eTime}
+                            zoomLevel={zoomLevel}
+                            audioUrl={clip.audioUrl}
+                            waveformPeaks={clip.waveformPeaks}
+                            audioTrimStart={tStart}
+                            audioTrimEnd={tEnd}
+                            audioDuration={clip.audioDuration}
+                            engine={clip.engine}
+                            voice={clip.voice}
+                            isActive={timelineCurrentTime >= sTime && timelineCurrentTime < eTime}
+                            isSelected={selectedClipId?.id === clip.id && selectedClipId?.type === 'audio'}
+                            isDragging={isDragging}
+                            onSelect={() => setSelectedClipId({ id: clip.id, type: 'audio' })}
+                            onDragStart={handleDragPointerDown}
+                            onDragMove={handleDragPointerMove}
+                            onDragEnd={handleDragPointerUp}
+                            laneTopPct={laneTopPct}
+                            laneHeightPct={laneHeight}
+                            onAutoTrim={handleAutoTrim}
+                            isOverlapping={audioOverlaps.has(clip.id)}
+                            emotions={clip.emotions}
+                          />
+                        );
+                      })}
                       </div>
                     </div>
-                    <div className="relative flex-1 h-full">
-                      {audioClips.filter(clip => {
-                          const viewportStartTime = timelineScrollLeft / pixelsPerSecond;
-                          const viewportEndTime = (timelineScrollLeft + timelineViewportWidth) / pixelsPerSecond;
-                          const padding = 2;
-                          return (clip.startTime <= viewportEndTime + padding) && (clip.endTime >= viewportStartTime - padding);
-                      }).map((clip) => {
-                        const isDragging = !!(dragVisuals && dragVisuals.id === clip.id);
-                        const sTime = isDragging ? dragVisuals!.startTime : clip.startTime;
-                        const eTime = isDragging ? dragVisuals!.endTime : clip.endTime;
-                        const tStart = isDragging ? dragVisuals!.audioTrimStart : clip.audioTrimStart;
-                        const tEnd = isDragging ? dragVisuals!.audioTrimEnd : clip.audioTrimEnd;
-                        const lane = audioLanes.laneMap.get(clip.id) ?? 0;
-                        const laneHeight = 100 / audioLanes.laneCount;
-                        const laneTopPct = lane * laneHeight;
-
-                        return (
-                        <TimelineClip 
-                          key={`audio-${clip.id}`}
-                          id={clip.id}
-                          type="audio"
-                          startTime={sTime}
-                          endTime={eTime}
-                          zoomLevel={zoomLevel}
-                          audioUrl={clip.audioUrl}
-                          waveformPeaks={clip.waveformPeaks}
-                          audioTrimStart={tStart}
-                          audioTrimEnd={tEnd}
-                          audioDuration={clip.audioDuration}
-                          engine={clip.engine}
-                          voice={clip.voice}
-                          isActive={timelineCurrentTime >= sTime && timelineCurrentTime < eTime}
-                          isSelected={selectedClipId?.id === clip.id && selectedClipId?.type === 'audio'}
-                          isDragging={isDragging}
-                          onSelect={() => setSelectedClipId({ id: clip.id, type: 'audio' })}
-                          onDragStart={handleDragPointerDown}
-                          onDragMove={handleDragPointerMove}
-                          onDragEnd={handleDragPointerUp}
-                          laneTopPct={laneTopPct}
-                          laneHeightPct={laneHeight}
-                          onAutoTrim={handleAutoTrim}
-                          isOverlapping={audioOverlaps.has(clip.id)}
-                          emotions={clip.emotions}
-                        />
-                      );
-                    })}
-                    </div>
-                  </div>
+                  )}
                 </div>
 
                 {/* Playhead indicator - Enhanced */}

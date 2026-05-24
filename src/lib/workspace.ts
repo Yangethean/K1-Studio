@@ -349,10 +349,11 @@ export async function loadWorkspace(id: string): Promise<WorkspaceData | null> {
 export async function listWorkspaces(): Promise<WorkspaceMetadata[]> {
   try {
     const records = await db.getAllRecords(db.STORES.WORKSPACES);
+    if (!Array.isArray(records)) return [];
     return records
-      .map((r) => r.data?.metadata)
+      .map((r) => r?.data?.metadata)
       .filter((m): m is WorkspaceMetadata => !!m)
-      .sort((a, b) => b.lastModified - a.lastModified);
+      .sort((a, b) => (b.lastModified || 0) - (a.lastModified || 0));
   } catch (error) {
     console.error('Failed to list workspaces:', error);
     return [];
