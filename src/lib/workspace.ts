@@ -1,5 +1,6 @@
 // Core workspace persistence logic
 import * as db from './indexeddb';
+import { safeStorage, safeSessionStorage } from './safe-storage';
 import {
   WorkspaceData,
   WorkspaceDataSerialized,
@@ -42,10 +43,7 @@ function serializeAudioMetadata(audioMap: Map<number, AudioClipData>): Record<nu
 
 // Check if localStorage has old data to migrate
 function hasLegacyData(): boolean {
-  return !!(
-    typeof localStorage !== 'undefined' &&
-    localStorage.getItem('autosave_subtitles')
-  );
+  return !!safeStorage.getItem('autosave_subtitles');
 }
 
 // Parse legacy JSON with potential Blob references
@@ -82,27 +80,24 @@ function parseLegacySpeakers(jsonString: string): Speaker[] {
 
 // Get legacy TTS settings
 function getLegacyTTSSettings(): Partial<TTSSettings> {
-  if (typeof localStorage === 'undefined') return {};
-
+  const ttsEngine = safeStorage.getItem('tts_engine') as any;
   return {
-    ttsEngine: (localStorage.getItem('tts_engine') as any) || 'voxcpm',
-    defaultGeminiVoice: localStorage.getItem('default_gemini_voice') || 'Puck',
+    ttsEngine: ttsEngine || 'voxcpm',
+    defaultGeminiVoice: safeStorage.getItem('default_gemini_voice') || 'Puck',
     defaultVoxCPMVoice:
-      localStorage.getItem('default_voxcpm_voice') || 'khmer-male-1',
-    voxcpmUrl: localStorage.getItem('voxcpm_url') || 'http://127.0.0.1:8808',
-    geminiKey: localStorage.getItem('gemini_api_key') || undefined,
+      safeStorage.getItem('default_voxcpm_voice') || 'khmer-male-1',
+    voxcpmUrl: safeStorage.getItem('voxcpm_url') || 'http://127.0.0.1:8808',
+    geminiKey: safeStorage.getItem('gemini_api_key') || undefined,
   };
 }
 
 // Get legacy UI state
 function getLegacyUIState(): Partial<UIState> {
-  if (typeof localStorage === 'undefined') return {};
-
   return {
-    timelineHeight: parseInt(localStorage.getItem('timeline_height') || '150'),
-    leftPanelWidth: parseInt(localStorage.getItem('left_panel_width') || '320'),
+    timelineHeight: parseInt(safeStorage.getItem('timeline_height') || '150'),
+    leftPanelWidth: parseInt(safeStorage.getItem('left_panel_width') || '320'),
     videoPanelWidth: parseInt(
-      localStorage.getItem('video_panel_width') || '288'
+      safeStorage.getItem('video_panel_width') || '288'
     ),
     timelineCurrentTime: 0,
     zoomLevel: 60,
@@ -120,7 +115,7 @@ export async function migrateFromLocalStorage(): Promise<string | null> {
   }
 
   try {
-    const migrationMarked = localStorage.getItem('workspace_migration_done');
+    const migrationMarked = safeStorage.getItem('workspace_migration_done');
     if (migrationMarked) {
       return null; // Already migrated
     }
@@ -128,10 +123,10 @@ export async function migrateFromLocalStorage(): Promise<string | null> {
     console.log('Starting legacy data migration...');
 
     const subtitles = parseLegacySubtitles(
-      localStorage.getItem('autosave_subtitles') || '[]'
+      safeStorage.getItem('autosave_subtitles') || '[]'
     );
     const speakers = parseLegacySpeakers(
-      localStorage.getItem('autosave_speakers') || '[]'
+      safeStorage.getItem('autosave_speakers') || '[]'
     );
 
     // Create default workspace
@@ -178,8 +173,8 @@ export async function migrateFromLocalStorage(): Promise<string | null> {
     } as WorkspaceDataSerialized);
 
     // Mark migration as complete
-    localStorage.setItem('workspace_migration_done', 'true');
-    localStorage.setItem('active_workspace_id', workspaceId);
+    safeStorage.setItem('workspace_migration_done', 'true');
+    safeStorage.setItem('active_workspace_id', workspaceId);
 
     console.log('Legacy data migrated successfully to workspace:', workspaceId);
     return workspaceId;
@@ -288,9 +283,7 @@ export async function saveWorkspace(workspace: WorkspaceData): Promise<void> {
   }
 
   // Update active workspace in sessionStorage
-  if (typeof sessionStorage !== 'undefined') {
-    sessionStorage.setItem('active_workspace_id', workspace.metadata.id);
-  }
+  safeSessionStorage.setItem('active_workspace_id', workspace.metadata.id);
 }
 
 // Load workspace
@@ -381,11 +374,9 @@ export async function deleteWorkspace(id: string): Promise<void> {
     }
 
     // Remove from session storage if active
-    if (typeof sessionStorage !== 'undefined') {
-      const activeId = sessionStorage.getItem('active_workspace_id');
-      if (activeId === id) {
-        sessionStorage.removeItem('active_workspace_id');
-      }
+    const activeId = safeSessionStorage.getItem('active_workspace_id');
+    if (activeId === id) {
+      safeSessionStorage.removeItem('active_workspace_id');
     }
   } catch (error) {
     console.error('Failed to delete workspace:', error);
@@ -397,12 +388,10 @@ export async function deleteWorkspace(id: string): Promise<void> {
 export async function getOrCreateActiveWorkspace(): Promise<string> {
   try {
     // Check if there's an active workspace in session
-    if (typeof sessionStorage !== 'undefined') {
-      const activeId = sessionStorage.getItem('active_workspace_id');
-      if (activeId) {
-        const workspace = await loadWorkspace(activeId);
-        if (workspace) return activeId;
-      }
+    const activeId = safeSessionStorage.getItem('active_workspace_id');
+    if (activeId) {
+      const workspace = await loadWorkspace(activeId);
+      if (workspace) return activeId;
     }
 
     // Try to migrate from localStorage
@@ -413,17 +402,13 @@ export async function getOrCreateActiveWorkspace(): Promise<string> {
     const workspaces = await listWorkspaces();
     if (workspaces.length > 0) {
       const id = workspaces[0].id;
-      if (typeof sessionStorage !== 'undefined') {
-        sessionStorage.setItem('active_workspace_id', id);
-      }
+      safeSessionStorage.setItem('active_workspace_id', id);
       return id;
     }
 
     // Create default workspace
     const newId = await createWorkspace('My Project');
-    if (typeof sessionStorage !== 'undefined') {
-      sessionStorage.setItem('active_workspace_id', newId);
-    }
+    safeSessionStorage.setItem('active_workspace_id', newId);
     return newId;
   } catch (error) {
     console.error('Failed to get or create active workspace:', error);

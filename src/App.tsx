@@ -6,1235 +6,26 @@ import { fetchFile, toBlobURL } from '@ffmpeg/util';
 import * as workspaceLib from './lib/workspace';
 import * as workspaceExport from './lib/workspace-export';
 import { WorkspaceManager } from './components/WorkspaceManager';
-import { WorkspaceData } from './lib/workspace-types';
+import { WorkspaceData, Subtitle, Speaker } from './lib/workspace-types';
 import { handleExportDubbedWAV_FIXED, VirtualSubtitleList } from './patches/fixes';
 
-const TTS_VOICES = [
-  { id: 'Puck', label: 'Male: Puck' },
-  { id: 'Charon', label: 'Male: Charon' },
-  { id: 'Kore', label: 'Female: Kore' },
-  { id: 'Fenrir', label: 'Male: Fenrir' },
-  { id: 'Aoede', label: 'Female: Aoede' }
-];
-
-const VOXCPM_VOICES = [
-  { id: 'alloy', label: 'Neutral: Alloy' },
-  { id: 'echo', label: 'Male: Echo' },
-  { id: 'fable', label: 'British Male: Fable' },
-  { id: 'onyx', label: 'Deep Male: Onyx' },
-  { id: 'nova', label: 'Female: Nova' },
-  { id: 'shimmer', label: 'Clear Female: Shimmer' }
-];
-
-const SPEAKER_COLORS = [
-  '#f59e0b', // amber
-  '#10b981', // emerald
-  '#3b82f6', // blue
-  '#ef4444', // red
-  '#8b5cf6', // violet
-  '#ec4899', // pink
-  '#06b6d4', // cyan
-];
-
-const EMOTIONS = [
-  { id: 'angry', label: 'Angry', icon: '🔥', color: 'text-red-500', bg: 'bg-red-500/20', glow: 'shadow-red-500/50', border: 'border-red-500/50' },
-  { id: 'calm', label: 'Calm', icon: '❄', color: 'text-blue-400', bg: 'bg-blue-400/20', glow: 'shadow-blue-400/50', border: 'border-blue-400/50' },
-  { id: 'nervous', label: 'Nervous', icon: '⚡', color: 'text-yellow-400', bg: 'bg-yellow-400/20', glow: 'shadow-yellow-400/50', border: 'border-yellow-400/50' },
-  { id: 'sad', label: 'Sad', icon: '💧', color: 'text-purple-400', bg: 'bg-purple-400/20', glow: 'shadow-purple-400/50', border: 'border-purple-400/50' },
-  { id: 'sarcastic', label: 'Sarcastic', icon: '🎭', color: 'text-green-400', bg: 'bg-green-400/20', glow: 'shadow-green-400/50', border: 'border-green-400/50' },
-  { id: 'seductive', label: 'Seductive', icon: '💋', color: 'text-pink-400', bg: 'bg-pink-400/20', glow: 'shadow-pink-400/50', border: 'border-pink-400/50' },
-  { id: 'cold', label: 'Cold', icon: '🧊', color: 'text-cyan-300', bg: 'bg-cyan-300/20', glow: 'shadow-cyan-300/50', border: 'border-cyan-300/50' },
-  { id: 'commanding', label: 'Commanding', icon: '📢', color: 'text-orange-500', bg: 'bg-orange-500/20', glow: 'shadow-orange-500/50', border: 'border-orange-500/50' },
-  { id: 'exhausted', label: 'Exhausted', icon: '😴', color: 'text-slate-400', bg: 'bg-slate-400/20', glow: 'shadow-slate-400/50', border: 'border-slate-400/50' },
-  { id: 'arrogant', label: 'Arrogant', icon: '💅', color: 'text-rose-400', bg: 'bg-rose-400/20', glow: 'shadow-rose-400/50', border: 'border-rose-400/50' },
-  { id: 'scared', label: 'Scared', icon: '😨', color: 'text-amber-300', bg: 'bg-amber-300/20', glow: 'shadow-amber-300/50', border: 'border-amber-300/50' },
-  { id: 'childish', label: 'Childish', icon: '🧸', color: 'text-lime-400', bg: 'bg-lime-400/20', glow: 'shadow-lime-400/50', border: 'border-lime-400/50' },
-  { id: 'confident', label: 'Confident', icon: '🦁', color: 'text-indigo-400', bg: 'bg-indigo-400/20', glow: 'shadow-indigo-400/50', border: 'border-indigo-400/50' },
-  { id: 'emotional', label: 'Emotional', icon: '🫂', color: 'text-violet-400', bg: 'bg-violet-400/20', glow: 'shadow-violet-400/50', border: 'border-violet-400/50' },
-  { id: 'shouting', label: 'Shouting', icon: '🔊', color: 'text-red-600', bg: 'bg-red-600/20', glow: 'shadow-red-600/50', border: 'border-red-600/50' },
-  { id: 'whispering', label: 'Whispering', icon: '🤫', color: 'text-teal-400', bg: 'bg-teal-400/20', glow: 'shadow-teal-400/50', border: 'border-teal-400/50' },
-  { id: 'crying', label: 'Crying', icon: '😭', color: 'text-blue-500', bg: 'bg-blue-500/20', glow: 'shadow-blue-500/50', border: 'border-blue-500/50' },
-  { id: 'fast', label: 'Fast', icon: '🏃', color: 'text-emerald-400', bg: 'bg-emerald-400/20', glow: 'shadow-emerald-400/50', border: 'border-emerald-400/50' },
-  { id: 'slow', label: 'Slow', icon: '🐢', color: 'text-orange-400', bg: 'bg-orange-400/20', glow: 'shadow-orange-400/50', border: 'border-orange-400/50' },
-];
-
-const DEFAULT_EMOTION_DATA = {
-  emotions: ['calm'],
-  tone: 'normal',
-  energy: 0.5,
-  speed: 1.0,
-};
-
-const detectLocalKeywords = (text: string) => {
-  const data = { ...DEFAULT_EMOTION_DATA };
-  
-  if (text.includes('!')) {
-    data.emotions = ['confident'];
-    data.energy = 0.8;
-  }
-  if (text.includes('?')) {
-    data.emotions = ['nervous'];
-    data.tone = 'questioning';
-  }
-  if (text.includes('...')) {
-    data.emotions = ['sad'];
-    data.energy = 0.3;
-  }
-  if (text === text.toUpperCase() && text.length > 3) {
-    data.emotions = ['shouting'];
-    data.energy = 0.9;
-  }
-  
-  return data;
-};
-
-const cleanTextForTTS = (text: string) => {
-  return text
-    .replace(/^Speaker\s*\d+\s*(\([^)]*\))?\s*:\s*/gim, "") // Remove "Speaker 1 (angry): "
-    .replace(/^Default Speaker\s*:\s*/gim, "") // Remove "Default Speaker: "
-    .replace(/^\([^)]*\)\s*/gm, "") // Remove leading "(shouting) "
-    .replace(/\([^)]+\)/g, "") // Remove any remaining (metadata)
-    .replace(/\[[^\]]+\]/g, "") // Remove any remaining [metadata]
-    .trim();
-};
-
-interface Speaker {
-  id: string;
-  name: string;
-  voice: string;
-  engine: string;
-  refAudioFile: File | null;
-  refAudioBase64: string | null;
-  color: string;
-  defaultEmotion?: string;
-  emotionSensitivity?: number;
-}
-
-interface Subtitle {
-  id: number;
-  startTime: number;
-  endTime: number;
-  text: string;
-  cleanText: string;
-  speakerId: string;
-  audioUrl?: string; // object URL to the generated WAV
-  audioBlob?: Blob; // blob of the generated audio
-  audioDuration?: number; // duration of the generated audio in seconds
-  audioTrimStart?: number; // offset from beginning (seconds)
-  audioTrimEnd?: number; // point where it stops (seconds)
-  isGenerating?: boolean;
-  voice: string;
-  engine?: string;
-  refAudioFile?: File;
-  refAudioBase64?: string;
-  audioStartTime?: number;
-  isLinked?: boolean;
-  waveformPeaks?: number[];
-  audioBufferId?: string;
-  emotions?: string[];
-  tone?: string;
-  energy?: number;
-  speed?: number;
-  emotionDetected?: boolean;
-  emotionStatus?: 'detecting' | 'detected' | 'failed' | 'fallback';
-  speedMultiplier?: number;
-}
-
-// Convert "00:00:01,000" to seconds
-function parseTime(time: string): number {
-  if (!time) return 0;
-  const [hms, ms = "0"] = time.trim().replace(".", ",").split(",");
-  const parts = hms.split(":").map(Number);
-
-  let h = 0, m = 0, s = 0;
-
-  if (parts.length === 3) {
-    [h, m, s] = parts;
-  } else if (parts.length === 2) {
-    [m, s] = parts;
-  } else {
-    [s] = parts;
-  }
-
-  return h * 3600 + m * 60 + s + Number(ms.padEnd(3, "0").slice(0, 3)) / 1000;
-}
-
-function formatTime(seconds: number): string {
-  if (!Number.isFinite(seconds)) return "00:00:00";
-
-  const total = Math.max(0, Math.floor(seconds));
-  const h = Math.floor(total / 3600);
-  const m = Math.floor((total % 3600) / 60);
-  const s = total % 60;
-
-  return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
-}
-
-function getAudioDuration(url: string): Promise<number> {
-  return new Promise((resolve) => {
-    const audio = new Audio(url);
-    const timeout = setTimeout(() => {
-      resolve(1.5); // Fallback estimate
-    }, 3000); // 3-second safety timeout
-
-    audio.onloadedmetadata = () => {
-      clearTimeout(timeout);
-      resolve(audio.duration || 1.5);
-    };
-    audio.onerror = () => {
-      clearTimeout(timeout);
-      resolve(1.5);
-    };
-  });
-}
-import { generateWaveformWorker as generateWaveform, globalWaveformCache } from './patches/fixes';
-
-
-
-
-
-async function autoTrimSilence(url: string, threshold: number = 0.015): Promise<{ start: number; end: number }> {
-  try {
-    const response = await fetch(url);
-    const arrayBuffer = await response.arrayBuffer();
-    const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
-    const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
-    const channelData = audioBuffer.getChannelData(0);
-    const sampleRate = audioBuffer.sampleRate;
-    
-    let firstSample = 0;
-    for (let i = 0; i < channelData.length; i++) {
-        if (Math.abs(channelData[i]) > threshold) {
-            firstSample = i;
-            break;
-        }
-    }
-    
-    let lastSample = channelData.length - 1;
-    for (let i = channelData.length - 1; i >= 0; i--) {
-        if (Math.abs(channelData[i]) > threshold) {
-            lastSample = i;
-            break;
-        }
-    }
-    
-    const start = firstSample / sampleRate;
-    const end = lastSample / sampleRate;
-    
-    await audioContext.close();
-    return { start, end };
-  } catch (e) {
-    console.warn('Failed to auto trim silence', e);
-    return { start: 0, end: 0 };
-  }
-}
-
-function detectSpeaker(text: string): { speakerName: string; cleanText: string } {
-  // Priority patterns: Speaker 1:, Default Speaker:, Character Name:
-  const patterns = [
-    /^(Speaker\s*\d+)\s*[:\s]*(.*)/si,
-    /^(Default Speaker)\s*[:\s]*(.*)/si,
-    /^\[([^\]]+)\][:\s]*(.*)/s,    
-    /^\(([^)]+)\)[:\s]*(.*)/s,    
-    /^([^:\n]+):[:\s]*(.*)/s,    
-  ];
-
-  for (const pattern of patterns) {
-    const match = text.match(pattern);
-    if (match) {
-      // If it's a generic colon match, check if it looks like a name (not too long)
-      if (pattern.source.includes('^([^:\n]+):') && match[1].length > 25) continue;
-      return { speakerName: match[1].trim(), cleanText: match[2].trim() };
-    }
-  }
-
-  return { speakerName: 'Default Speaker', cleanText: text.trim() };
-}
-
-function formatKeyCode(code: string) {
-  if (!code) return 'None';
-  if (code.startsWith('Key')) return code.slice(3);
-  if (code.startsWith('Digit')) return code.slice(5);
-  if (code.startsWith('Numpad')) return 'Num ' + code.slice(6);
-  if (code === 'BracketLeft') return '[';
-  if (code === 'BracketRight') return ']';
-  if (code === 'Semicolon') return ';';
-  if (code === 'Quote') return "'";
-  if (code === 'Comma') return ',';
-  if (code === 'Period') return '.';
-  if (code === 'Slash') return '/';
-  if (code === 'Backslash') return '\\';
-  if (code === 'Backquote') return '`';
-  if (code === 'Minus') return '-';
-  if (code === 'Equal') return '=';
-  return code;
-}
-
-// Parse standard SRT format
-function parseSRT(srt: string): Subtitle[] {
-  const normalized = srt.replace(/\r\n/g, '\n');
-  const blocks = normalized.split('\n\n');
-  const subtitles: Subtitle[] = [];
-
-  for (const block of blocks) {
-    const lines = block.split('\n').map((l) => l.trim()).filter((l) => l.length > 0);
-    if (lines.length >= 3) {
-      const id = parseInt(lines[0], 10);
-      const timeMatch = lines[1].match(/(\d{2}:\d{2}:\d{2},\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2},\d{3})/);
-      if (timeMatch) {
-        const startTime = parseTime(timeMatch[1]);
-        const endTime = parseTime(timeMatch[2]);
-        const text = lines.slice(2).join(' ').trim();
-        if (text) {
-          const { speakerName, cleanText } = detectSpeaker(text);
-          subtitles.push({ 
-            id, 
-            startTime, 
-            endTime, 
-            text, 
-            cleanText,
-            speakerId: speakerName, // Initially use speakerName as ID
-            voice: 'default', 
-            audioStartTime: startTime, 
-            isLinked: true 
-          });
-        }
-      }
-    }
-  }
-  return subtitles;
-}
-
-// Convert PCM16 to WAV
-function encodeWAV(samples: Int16Array, sampleRate: number = 24000): Blob {
-  const buffer = new ArrayBuffer(44 + samples.length * 2);
-  const view = new DataView(buffer);
-
-  const writeString = (view: DataView, offset: number, string: string) => {
-    for (let i = 0; i < string.length; i++) {
-      view.setUint8(offset + i, string.charCodeAt(i));
-    }
-  };
-
-  writeString(view, 0, 'RIFF');
-  view.setUint32(4, 36 + samples.length * 2, true);
-  writeString(view, 8, 'WAVE');
-  writeString(view, 12, 'fmt ');
-  view.setUint32(16, 16, true);
-  view.setUint16(20, 1, true);
-  view.setUint16(22, 1, true); // Mono
-  view.setUint32(24, sampleRate, true);
-  view.setUint32(28, sampleRate * 2, true);
-  view.setUint16(32, 2, true);
-  view.setUint16(34, 16, true);
-  writeString(view, 36, 'data');
-  view.setUint32(40, samples.length * 2, true);
-
-  let offset = 44;
-  for (let i = 0; i < samples.length; i++, offset += 2) {
-    view.setInt16(offset, samples[i], true);
-  }
-
-  return new Blob([view], { type: 'audio/wav' });
-}
-
-// Automatically peak-normalizes an audio blob to a target peak level (e.g., 0.95 or -0.44dBFS)
-async function normalizeAudioBlob(blob: Blob, targetPeak: number = 0.95): Promise<Blob> {
-  try {
-    const arrayBuffer = await blob.arrayBuffer();
-    const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
-    const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
-    
-    const sampleRate = audioBuffer.sampleRate;
-    const channelData = audioBuffer.getChannelData(0); // TTS output is mono
-    
-    let maxVal = 0;
-    for (let i = 0; i < channelData.length; i++) {
-      const val = Math.abs(channelData[i]);
-      if (val > maxVal) {
-        maxVal = val;
-      }
-    }
-    
-    if (maxVal < 0.0001) {
-      // Extremely low or silent audio, skip normalizing to avoid boosting noise floor
-      return blob;
-    }
-    
-    const gain = targetPeak / maxVal;
-    const pcm16 = new Int16Array(channelData.length);
-    for (let i = 0; i < channelData.length; i++) {
-      const scaled = channelData[i] * gain;
-      const clamped = Math.min(1.0, Math.max(-1.0, scaled));
-      pcm16[i] = clamped < 0 ? clamped * 32768 : clamped * 32767;
-    }
-    
-    // Attempt closing AudioContext to free system resources
-    try {
-      if (audioContext.state !== 'closed') {
-        await audioContext.close();
-      }
-    } catch (closeErr) {
-      console.warn("Could not close audioContext:", closeErr);
-    }
-    
-    return encodeWAV(pcm16, sampleRate);
-  } catch (err) {
-    console.error("Failed to automatically normalize audio:", err);
-    return blob; // Fallback to original blob in case decoding fails
-  }
-}
-
-// Memoized Timeline Clip for better performance
-interface TimelineClipProps {
-  id: number;
-  type: 'subtitle' | 'audio';
-  startTime: number;
-  endTime: number;
-  text?: string;
-  zoomLevel: number;
-  audioUrl?: string;
-  waveformPeaks?: number[];
-  audioTrimStart?: number;
-  audioTrimEnd?: number;
-  audioDuration?: number;
-  engine?: string;
-  voice?: string;
-  isActive: boolean;
-  isSelected: boolean;
-  isDragging?: boolean;
-  onSelect: () => void;
-  onAutoTrim?: (id: number) => void;
-  onDragStart: (e: React.PointerEvent, id: number, type: any) => void;
-  onDragMove: (e: React.PointerEvent) => void;
-  onDragEnd: (e: React.PointerEvent) => void;
-  isOverlapping?: boolean;
-  emotions?: string[];
-  laneTopPct?: number;
-  laneHeightPct?: number;
-}
-
-const TimelineClip = React.memo(({
-  id, type, startTime, endTime, text, zoomLevel, audioUrl, waveformPeaks,
-  audioTrimStart, audioTrimEnd, audioDuration, engine, voice,
-  isActive, isSelected, isDragging, onSelect, onAutoTrim, onDragStart, onDragMove, onDragEnd, isOverlapping,
-  emotions, laneTopPct, laneHeightPct
-}: TimelineClipProps) => {
-  const [localWaveform, setLocalWaveform] = useState<number[] | undefined>(waveformPeaks);
-
-  // Guard against invalid or crash-inducing values
-  const safeStartTime = Number.isFinite(startTime) ? startTime : 0;
-  const safeEndTime = Number.isFinite(endTime) ? endTime : safeStartTime + 0.1;
-  const duration = Math.max(0.01, safeEndTime - safeStartTime);
-  
-  const left = safeStartTime * zoomLevel;
-  const width = Math.max(2, duration * zoomLevel);
-
-  useEffect(() => {
-    // If we have peaks, use them
-    if (waveformPeaks && waveformPeaks.length > 0) {
-      setLocalWaveform(waveformPeaks);
-      if (audioUrl) globalWaveformCache.set(audioUrl, waveformPeaks);
-    } 
-    // If peaks are missing but we have a URL, check global cache or rebuild
-    else if (audioUrl) {
-       const cached = globalWaveformCache.get(audioUrl);
-       if (cached) {
-         setLocalWaveform(cached);
-       } else if (!localWaveform || localWaveform.length === 0) {
-         console.log(`[Waveform] Rebuilding for clip ${id}...`);
-         generateWaveform(audioUrl).then(peaks => {
-           if (peaks && peaks.length > 0) {
-             setLocalWaveform(peaks);
-           }
-         });
-       }
-    }
-  }, [waveformPeaks, audioUrl, id]);
-
-  const getClipColor = () => {
-    if (type === 'subtitle') {
-      if (isActive) return 'bg-amber-400 border-amber-300 text-amber-950 ring-2 ring-amber-400/50';
-      if (audioUrl) return 'bg-emerald-500/20 border-emerald-500/60 text-emerald-300';
-      return 'bg-slate-800/50 border-slate-700 text-slate-400';
-    } else {
-      if (isOverlapping) return 'bg-rose-500/30 border-rose-400 ring-rose-500/50';
-      if (isActive) return 'bg-purple-900 border-purple-400 ring-1 ring-white/30';
-
-      if (emotions && emotions.length > 0) {
-        const config = EMOTIONS.find(e => e.id === emotions[0]);
-        if (config) {
-          return `${config.bg} border-current ring-1 ring-current/20 ${config.color} ${config.glow}`;
-        }
-      }
-
-      const colors: Record<string, string> = {
-        alloy: 'bg-blue-500/20 border-blue-500/60 text-blue-300',
-        echo: 'bg-indigo-500/20 border-indigo-500/60 text-indigo-300',
-        fable: 'bg-purple-500/20 border-purple-500/60 text-purple-300',
-        nova: 'bg-pink-500/20 border-pink-500/60 text-pink-300',
-        shimmer: 'bg-orange-500/20 border-orange-500/60 text-orange-300'
-      };
-      return (voice && colors[voice]) || 'bg-violet-500/20 border-violet-500/60 text-violet-300';
-    }
-  };
-
-  const handleResetTrim = (e: React.MouseEvent) => {
-    e.stopPropagation();
-    // This will be handled by the parent component via a custom event or a dedicated prop if needed
-    // But for now we can just use a DOM event or the parent's updateSubtitles
-    const event = new CustomEvent('reset-trim', { detail: { id, type } });
-    window.dispatchEvent(event);
-  };
-
-  return (
-    <div 
-      className={`absolute rounded-lg border cursor-grab active:cursor-grabbing transition-all timeline-clip ${getClipColor()} ${isSelected ? 'ring-2 ring-white z-50' : 'z-10'} group overflow-hidden`}
-      style={{ 
-        left, 
-        width,
-        ...(laneTopPct !== undefined && laneHeightPct !== undefined
-          ? { top: `${laneTopPct + 2}%`, height: `${laneHeightPct - 4}%`, minHeight: '24px' }
-          : { top: '10%', height: '80%', minHeight: '28px' }),
-        opacity: isDragging ? 0.7 : 1,
-        transform: isDragging ? 'scale(1.02)' : 'none',
-        filter: isDragging ? 'drop-shadow(0 0 8px rgba(251,191,36,0.4))' : 'drop-shadow(0 0 0px transparent)',
-        transition: isDragging ? 'none' : 'all 0.2s ease-out'
-      }}
-      onPointerDown={(e) => {
-        onSelect();
-        onDragStart(e, id, type);
-      }}
-      onPointerMove={onDragMove}
-      onPointerUp={onDragEnd}
-      onDoubleClick={handleResetTrim}
-    >
-      {type === 'subtitle' && (
-        <>
-          <div className="absolute inset-0 px-3 py-1 flex items-center justify-center overflow-hidden pointer-events-none">
-            <span className="text-[11px] font-semibold truncate">{text}</span>
-          </div>
-          
-          {/* Left Trim Handle - Improved */}
-          <div 
-             className="absolute left-0 top-0 bottom-0 w-3 hover:bg-white/30 cursor-ew-resize z-20 group hover:shadow-lg hover:shadow-white/20"
-             onPointerDown={(e) => { e.stopPropagation(); onDragStart(e, id, 'trim-text-start'); }}
-          >
-            <div className="absolute inset-y-2 left-1 w-0.5 bg-white/50 group-hover:bg-white opacity-0 group-hover:opacity-100 transition-all" />
-            <div className="absolute inset-y-2 left-[6px] w-0.5 bg-white/50 group-hover:bg-white opacity-0 group-hover:opacity-100 transition-all" />
-          </div>
-          
-          {/* Right Trim Handle - Improved */}
-          <div 
-             className="absolute right-0 top-0 bottom-0 w-3 hover:bg-white/30 cursor-ew-resize z-20 group hover:shadow-lg hover:shadow-white/20"
-             onPointerDown={(e) => { e.stopPropagation(); onDragStart(e, id, 'trim-text-end'); }}
-          >
-            <div className="absolute inset-y-2 right-1 w-0.5 bg-white/50 group-hover:bg-white opacity-0 group-hover:opacity-100 transition-all" />
-            <div className="absolute inset-y-2 right-[6px] w-0.5 bg-white/50 group-hover:bg-white opacity-0 group-hover:opacity-100 transition-all" />
-          </div>
-        </>
-      )}
-
-      {type === 'audio' && (
-        <>
-          {/* Waveform with Gradient */}
-          {(localWaveform && localWaveform.length > 0) ? (
-            <div 
-              className="absolute inset-0 h-full overflow-hidden pointer-events-none"
-            >
-              <div className="absolute inset-0 bg-gradient-to-b from-black/20 to-black/5 z-10" />
-              <div
-                className="absolute h-full"
-                style={{
-                  left: Number.isFinite(audioTrimStart) ? -(audioTrimStart! * zoomLevel) : 0,
-                  width: Number.isFinite(audioDuration) ? (audioDuration! * zoomLevel) : (duration * zoomLevel)
-                }}
-              >
-                <svg className="w-full h-full" preserveAspectRatio="none" viewBox={`0 0 ${localWaveform.length} 100`}>
-                  <defs>
-                    <linearGradient id={`waveGradient-${id}`} x1="0%" y1="0%" x2="0%" y2="100%">
-                      <stop offset="0%" stopColor="currentColor" stopOpacity="0.6" />
-                      <stop offset="100%" stopColor="currentColor" stopOpacity="0.2" />
-                    </linearGradient>
-                  </defs>
-                  <path 
-                    d={localWaveform.map((v, i) => `M${i},${50 - v * 45} L${i},${50 + v * 45}`).join(' ')} 
-                    stroke={`url(#waveGradient-${id})`}
-                    strokeWidth="1.5" 
-                  />
-                </svg>
-              </div>
-
-              {/* Hatched overlay for trimmed regions */}
-              {Number.isFinite(audioTrimStart) && audioTrimStart! > 0 && (
-                <div
-                  className="absolute top-0 bottom-0 opacity-40"
-                  style={{
-                    left: 0,
-                    width: `${audioTrimStart! * zoomLevel}px`,
-                    background: 'repeating-linear-gradient(45deg, rgba(0,0,0,0.4) 0px, rgba(0,0,0,0.4) 1px, transparent 1px, transparent 3px)'
-                  }}
-                />
-              )}
-              {Number.isFinite(audioTrimEnd) && Number.isFinite(audioDuration) && audioTrimEnd! < audioDuration! && (
-                <div
-                  className="absolute top-0 bottom-0 opacity-40"
-                  style={{
-                    right: 0,
-                    width: `${(audioDuration! - audioTrimEnd!) * zoomLevel}px`,
-                    background: 'repeating-linear-gradient(45deg, rgba(0,0,0,0.4) 0px, rgba(0,0,0,0.4) 1px, transparent 1px, transparent 3px)'
-                  }}
-                />
-              )}
-            </div>
-          ) : audioUrl ? (
-            <div className="absolute inset-0 flex items-center justify-center pointer-events-none opacity-50">
-              <span className="text-[8px] animate-pulse">Building waveform...</span>
-            </div>
-          ) : null}
-
-          {/* Duration label inside clip */}
-          <div className="absolute inset-0 px-2 py-1 flex items-center justify-between pointer-events-none z-20">
-            <span className="text-[9px] font-bold text-white/80 bg-black/40 px-1.5 py-0.5 rounded opacity-0 group-hover:opacity-100 transition-opacity">{duration.toFixed(2)}s</span>
-            {engine && voice && (
-              <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                <span className="text-[8px] font-semibold px-1.5 py-0.5 rounded bg-amber-500/30 text-amber-300 border border-amber-500/50">{engine}</span>
-              </div>
-            )}
-          </div>
-          
-          {/* Overlap Warning Badge */}
-          {isOverlapping && (
-            <div className="absolute -top-4 left-1/2 -translate-x-1/2 bg-rose-500/80 text-white text-[8px] font-bold px-1.5 py-0.5 rounded-full border border-rose-400/50 shadow-lg shadow-rose-500/30 whitespace-nowrap z-30">
-              ⚠ Overlap
-            </div>
-          )}
-
-          {/* Left Trim Handle - Improved */}
-          <div 
-             className="absolute left-0 top-0 bottom-0 w-3 hover:bg-white/20 cursor-ew-resize z-20 group hover:shadow-lg hover:shadow-white/20"
-             onPointerDown={(e) => { e.stopPropagation(); onDragStart(e, id, 'trim-audio-start'); }}
-          >
-            <div className="absolute inset-y-2 left-1 w-0.5 bg-white/50 group-hover:bg-white opacity-0 group-hover:opacity-100 transition-all" />
-            <div className="absolute inset-y-2 left-[6px] w-0.5 bg-white/50 group-hover:bg-white opacity-0 group-hover:opacity-100 transition-all" />
-          </div>
-
-          {/* Right Trim Handle - Improved */}
-          <div 
-             className="absolute right-0 top-0 bottom-0 w-3 hover:bg-white/20 cursor-ew-resize z-20 group hover:shadow-lg hover:shadow-white/20"
-             onPointerDown={(e) => { e.stopPropagation(); onDragStart(e, id, 'trim-audio-end'); }}
-          >
-            <div className="absolute inset-y-2 right-1 w-0.5 bg-white/50 group-hover:bg-white opacity-0 group-hover:opacity-100 transition-all" />
-            <div className="absolute inset-y-2 right-[6px] w-0.5 bg-white/50 group-hover:bg-white opacity-0 group-hover:opacity-100 transition-all" />
-          </div>
-
-          {onAutoTrim && (
-            <button 
-              onClick={(e) => { e.stopPropagation(); onAutoTrim(id); }}
-              className="absolute -top-7 left-1/2 -translate-x-1/2 px-2 py-1 bg-slate-800 border border-slate-700 rounded text-[9px] text-slate-300 hover:text-white hover:bg-slate-700 opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap z-30 flex items-center gap-1 active:scale-95 shadow-lg"
-              title="Auto Trim Silence"
-            >
-              <ListChecks className="w-3 h-3" />
-              Auto Trim
-            </button>
-          )}
-        </>
-      )}
-    </div>
-  );
-});
-
-// Memoized Sidebar List Item for better performance
-interface SubtitleListItemProps {
-  sub: Subtitle;
-  isActive: boolean;
-  isBatchEditMode: boolean;
-  selectedSubtitles: Set<number>;
-  previewingId: number | null;
-  isGeneratingAll: boolean;
-  ttsEngine: string;
-  defaultVoxCPMVoice: string;
-  referenceAudioFile: File | null;
-  referenceAudioBase64: string | null;
-  handleToggleLink: (id: number) => void;
-  toggleSubtitleSelection: (id: number) => void;
-  handlePreviewAudio: (e: React.MouseEvent, sub: Subtitle) => void;
-  handleGenerateSingle: (e: React.MouseEvent, sub: Subtitle) => void;
-  handleEngineChange: (id: number, engine: string) => void;
-  handleVoiceChange: (id: number, voice: string) => void;
-  handleSubReferenceAudioUpload: (id: number, e: React.ChangeEvent<HTMLInputElement>) => void;
-  playAudioFile: (file: File) => void;
-  updateSubtitles: (updater: Subtitle[] | ((prev: Subtitle[]) => Subtitle[]), skipHistory?: boolean) => void;
-  videoRef: React.RefObject<HTMLVideoElement>;
-}
-
-const SubtitleListItem = React.memo(({ 
-  sub, 
-  isActive, 
-  isBatchEditMode, 
-  selectedSubtitles, 
-  previewingId,
-  isGeneratingAll,
-  ttsEngine,
-  defaultVoxCPMVoice,
-  referenceAudioFile,
-  referenceAudioBase64,
-  handleToggleLink,
-  toggleSubtitleSelection,
-  handlePreviewAudio,
-  handleGenerateSingle,
-  handleEngineChange,
-  handleVoiceChange,
-  handleSubReferenceAudioUpload,
-  playAudioFile,
-  updateSubtitles,
-  videoRef
-}: SubtitleListItemProps) => {
-  const handleInsertBefore = (e: React.MouseEvent) => {
-    e.stopPropagation();
-    updateSubtitles((prev) => {
-      const idx = prev.findIndex((s) => s.id === sub.id);
-      if (idx === -1) return prev;
-
-      const prevSub = idx > 0 ? prev[idx - 1] : null;
-      let startTime = 0;
-      let endTime = 1.5;
-
-      if (prevSub) {
-        const gap = sub.startTime - prevSub.endTime;
-        if (gap >= 1.0) {
-          startTime = prevSub.endTime + 0.1;
-          endTime = Math.min(startTime + 1.5, sub.startTime - 0.1);
-        } else {
-          startTime = Math.max(0, sub.startTime - 1.0);
-          endTime = sub.startTime;
-        }
-      } else {
-        startTime = Math.max(0, sub.startTime - 2.0);
-        endTime = Math.max(startTime + 0.5, sub.startTime - 0.1);
-      }
-
-      const nextId = prev.length > 0 ? Math.max(...prev.map((s) => s.id)) + 1 : 1;
-      const newSub: Subtitle = {
-        id: nextId,
-        startTime,
-        endTime,
-        text: "New subtitle line",
-        cleanText: "New subtitle line",
-        speakerId: sub.speakerId || "Default Speaker",
-        voice: "default",
-        audioStartTime: startTime,
-        isLinked: true,
-      };
-
-      const updated = [...prev];
-      updated.splice(idx, 0, newSub);
-      return updated;
-    });
-  };
-
-  const handleInsertAfter = (e: React.MouseEvent) => {
-    e.stopPropagation();
-    updateSubtitles((prev) => {
-      const idx = prev.findIndex((s) => s.id === sub.id);
-      if (idx === -1) return prev;
-
-      const nextSub = idx < prev.length - 1 ? prev[idx + 1] : null;
-      let startTime = sub.endTime + 0.1;
-      let endTime = startTime + 1.5;
-
-      if (nextSub) {
-        const gap = nextSub.startTime - sub.endTime;
-        if (gap >= 1.0) {
-          startTime = sub.endTime + 0.1;
-          endTime = Math.min(startTime + 1.5, nextSub.startTime - 0.1);
-        } else {
-          startTime = sub.endTime;
-          endTime = sub.endTime + 1.0;
-        }
-      }
-
-      const nextId = prev.length > 0 ? Math.max(...prev.map((s) => s.id)) + 1 : 1;
-      const newSub: Subtitle = {
-        id: nextId,
-        startTime,
-        endTime,
-        text: "New subtitle line",
-        cleanText: "New subtitle line",
-        speakerId: sub.speakerId || "Default Speaker",
-        voice: "default",
-        audioStartTime: startTime,
-        isLinked: true,
-      };
-
-      const updated = [...prev];
-      updated.splice(idx + 1, 0, newSub);
-      return updated;
-    });
-  };
-
-  const handleDeleteSub = (e: React.MouseEvent) => {
-    e.stopPropagation();
-    updateSubtitles((prev) => prev.filter((s) => s.id !== sub.id));
-  };
-
-  return (
-    <div 
-      className={`p-3 border-b border-slate-800/50 transition-colors cursor-pointer ${isActive && !isBatchEditMode ? 'bg-slate-800/30 border-l-2 border-l-amber-500' : 'hover:bg-slate-800/20'} ${selectedSubtitles.has(sub.id) ? 'bg-amber-900/20 border-l-2 border-l-amber-500' : ''}`}
-      onClick={() => {
-        if (isBatchEditMode) {
-          toggleSubtitleSelection(sub.id);
-        } else {
-          if (videoRef.current) {
-            videoRef.current.currentTime = sub.startTime;
-          }
-        }
-      }}
-    >
-      <div className="flex items-center justify-between mb-2">
-        <div className="flex items-center gap-2">
-          <button 
-            onClick={(e) => { e.stopPropagation(); handleToggleLink(sub.id); }}
-            className={`p-1 rounded transition ${sub.isLinked === false ? 'bg-rose-500/10 text-rose-500' : 'text-slate-500 hover:text-slate-300'}`}
-            title={sub.isLinked === false ? "Unlinked" : "Linked"}
-          >
-            {sub.isLinked === false ? <Link2Off className="w-3.5 h-3.5" /> : <Link2 className="w-3.5 h-3.5" />}
-          </button>
-          {isBatchEditMode && (
-            <input 
-              type="checkbox" 
-              checked={selectedSubtitles.has(sub.id)}
-              readOnly
-              className="w-3 h-3 rounded border-slate-700 bg-slate-900 checked:bg-amber-500"
-            />
-          )}
-          <span className={`text-[10px] ${isActive && !isBatchEditMode ? 'text-amber-500' : 'text-slate-500'}`}>
-            {formatTime(sub.startTime)}
-            {sub.speakerId && (
-              <span className="ml-2 px-1.5 py-0.5 rounded-sm bg-slate-800 text-[9px] uppercase font-bold border border-slate-700 max-w-[80px] truncate inline-block align-middle" title={sub.speakerId}>
-                {sub.speakerId}
-              </span>
-            )}
-          </span>
-          
-          {/* Emotion Badges */}
-          <div className="flex items-center gap-1">
-            {sub.emotionStatus === 'detecting' && (
-              <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-amber-500/10 text-amber-500 flex items-center gap-1 animate-pulse border border-amber-500/20">
-                <Loader2 className="w-2.5 h-2.5 animate-spin" />
-                AI
-              </span>
-            )}
-            {sub.emotionStatus === 'failed' && (
-              <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-red-500/10 text-red-500 border border-red-500/20" title="AI detection failed">
-                ERROR
-              </span>
-            )}
-            {sub.emotionStatus === 'fallback' && (
-              <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-orange-500/10 text-orange-400 border border-orange-500/20" title="Using local logic fallback">
-                AUTO
-              </span>
-            )}
-            {sub.emotions?.map(eid => {
-              const config = EMOTIONS.find(e => e.id === eid);
-              if (!config) return null;
-              return (
-                <span 
-                  key={eid} 
-                  className={`text-[9px] px-1.5 py-0.5 rounded-full flex items-center gap-1 font-bold border border-current/20 ${config.bg} ${config.color}`}
-                  title={config.label}
-                >
-                  <span className="text-[10px] leading-none">{config.icon}</span>
-                  <span className="uppercase tracking-tighter">{eid}</span>
-                </span>
-              );
-            })}
-          </div>
-        </div>
-        
-        <div className="flex items-center gap-1.5">
-          {sub.audioUrl && sub.audioDuration && (sub.audioDuration > sub.endTime - sub.startTime + 0.1) && (
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                const containerDuration = sub.endTime - sub.startTime;
-                if (containerDuration > 0) {
-                  const targetSpeed = Math.min(2.5, Math.max(0.5, sub.audioDuration / containerDuration));
-                  updateSubtitles(prev => prev.map(item => item.id === sub.id ? { ...item, speedMultiplier: targetSpeed } : item));
-                }
-              }}
-              className="text-[9px] text-amber-500 font-bold bg-amber-500/10 hover:bg-amber-500/20 px-1.5 py-0.5 rounded border border-amber-500/20 active:scale-95 transition-all flex items-center gap-0.5 cursor-pointer select-none"
-              title="Speech is longer than subtitle window. Click to automatically speed-up speech to fit exact timing!"
-            >
-              ⚡ Auto-Fit
-            </button>
-          )}
-          {sub.isGenerating ? (
-            <span className="text-[10px] text-amber-500 flex items-center gap-1">
-              <Loader2 className="w-3 h-3 animate-spin"/>
-            </span>
-          ) : sub.audioUrl ? (
-             <div className="flex items-center gap-2">
-              {isActive && <span className="text-[10px] text-emerald-400">Playing</span>}
-              <button 
-                onClick={(e) => handlePreviewAudio(e, sub)}
-                className="text-amber-500 hover:text-amber-400 transition-colors p-1 hover:bg-slate-800 rounded"
-                title="Preview Audio"
-              >
-                {previewingId === sub.id ? <Square className="w-3.5 h-3.5 fill-current" /> : <Play className="w-3.5 h-3.5 fill-current" />}
-              </button>
-              <button 
-                onClick={(e) => handleGenerateSingle(e, sub)}
-                disabled={isGeneratingAll}
-                className="text-slate-500 hover:text-amber-400 transition-colors p-1 hover:bg-slate-800 rounded disabled:opacity-50"
-                title="Regenerate Audio"
-              >
-                <RotateCw className="w-3.5 h-3.5" />
-              </button>
-              <a href={sub.audioUrl} download={`sub_${sub.id}.wav`} className="text-slate-500 hover:text-white transition-colors p-1 hover:bg-slate-800 rounded" title="Download WAV" onClick={(e) => e.stopPropagation()}>
-                <Download className="w-3.5 h-3.5" />
-              </a>
-            </div>
-          ) : (
-            <button
-                onClick={(e) => handleGenerateSingle(e, sub)}
-                disabled={isGeneratingAll}
-                className="text-[10px] text-slate-400 hover:text-amber-500 transition-colors px-2 py-1 border border-slate-700 hover:border-amber-500/50 rounded bg-slate-800 disabled:opacity-50"
-            >
-                Generate
-            </button>
-          )}
-
-          <div className="h-4 w-[1px] bg-slate-800/80 mx-1" />
-
-          <button
-            onClick={handleInsertBefore}
-            className="text-slate-500 hover:text-amber-500 hover:bg-slate-800/80 p-1 rounded transition-colors flex items-center justify-center gap-0.5"
-            title="Insert Subtitle Line Before"
-          >
-            <Plus className="w-3 h-3 shrink-0" />
-            <span className="text-[8px] font-bold leading-none">▲</span>
-          </button>
-
-          <button
-            onClick={handleInsertAfter}
-            className="text-slate-500 hover:text-amber-500 hover:bg-slate-800/80 p-1 rounded transition-colors flex items-center justify-center gap-0.5"
-            title="Insert Subtitle Line After"
-          >
-            <Plus className="w-3 h-3 shrink-0" />
-            <span className="text-[8px] font-bold leading-none">▼</span>
-          </button>
-
-          <button
-            onClick={handleDeleteSub}
-            className="text-slate-500 hover:text-rose-500 hover:bg-rose-500/10 p-1 rounded transition-colors flex items-center justify-center"
-            title="Delete Subtitle Line"
-          >
-            <Trash2 className="w-3.5 h-3.5 shrink-0" />
-          </button>
-        </div>
-      </div>
-      <textarea 
-        value={sub.text}
-        onClick={(e) => e.stopPropagation()}
-        onChange={(e) => {
-           updateSubtitles(prev => prev.map(s => s.id === sub.id ? { ...s, text: e.target.value } : s));
-        }}
-        className={`w-full bg-slate-900/50 border border-slate-700/50 rounded-md p-2 text-sm leading-relaxed mb-2 focus:outline-none focus:border-amber-500/50 focus:bg-slate-900 resize-y min-h-[60px] custom-scrollbar transition-colors ${isActive ? 'text-slate-200 font-medium' : 'text-slate-400 focus:text-slate-200'}`}
-        placeholder="Subtitle text..."
-      />
-      <div className="flex items-center justify-between gap-2">
-        <div className="flex items-center gap-1.5 overflow-x-auto pb-1 custom-scrollbar scrollbar-hide no-scrollbar max-w-[140px]">
-           {EMOTIONS.map(emo => (
-             <button
-               key={emo.id}
-               onClick={(e) => {
-                 e.stopPropagation();
-                 const current = sub.emotions || [];
-                 const next = current.includes(emo.id) 
-                   ? current.filter(id => id !== emo.id)
-                   : [...current, emo.id];
-                 updateSubtitles(prev => prev.map(s => s.id === sub.id ? { ...s, emotions: next } : s));
-               }}
-               className={`shrink-0 w-6 h-6 flex items-center justify-center rounded-full border transition-all ${sub.emotions?.includes(emo.id) ? `${emo.bg} ${emo.border} ${emo.glow}` : 'border-slate-800 bg-slate-950/50 grayscale opacity-50 hover:grayscale-0 hover:opacity-100'}`}
-               title={emo.label}
-             >
-               <span className="text-xs">{emo.icon}</span>
-             </button>
-           ))}
-        </div>
-
-        <div className="flex items-center gap-2">
-          <select
-            value={sub.engine || 'voxcpm'}
-          onClick={(e) => e.stopPropagation()}
-          onChange={(e) => handleEngineChange(sub.id, e.target.value)}
-          className="bg-slate-900 text-[10px] text-slate-400 border border-slate-700 rounded px-2 py-1 outline-none hover:border-slate-500/50 transition-colors"
-        >
-          <option value="voxcpm">VoxCPM</option>
-          <option value="gemini">Gemini</option>
-          <option value="google-free">Google Free</option>
-        </select>
-        {(() => {
-          const eng = (!sub.engine) ? 'voxcpm' : sub.engine;
-          return eng === 'gemini' ? (
-          <select 
-            value={sub.voice} 
-            onClick={(e) => e.stopPropagation()}
-            onChange={(e) => handleVoiceChange(sub.id, e.target.value)}
-            className="bg-slate-900 text-[10px] text-slate-400 border border-slate-700 rounded px-2 py-1 outline-none hover:border-amber-500/50 transition-colors"
-          >
-            <option value="default">Global Default</option>
-            {TTS_VOICES.map((v) => (
-              <option key={v.id} value={v.id}>{v.label}</option>
-            ))}
-          </select>
-        ) : eng === 'voxcpm' ? (
-          <div className="flex items-center gap-2">
-            <label className={`text-[10px] text-purple-400 border border-slate-700 rounded px-2 py-1 ${!sub.refAudioFile ? 'hover:border-purple-500 cursor-pointer' : ''} bg-slate-900 transition-colors flex items-center gap-1 min-h-[26px]`}>
-               <Music className="w-3 h-3 shrink-0" />
-               {sub.refAudioFile ? (
-                 <div className="flex items-center gap-1.5 overflow-hidden">
-                   <span className="truncate max-w-[50px] inline-block" title={sub.refAudioFile.name}>{sub.refAudioFile.name}</span>
-                   <button 
-                      className="hover:text-slate-200 text-slate-400 transition-colors ml-1 p-0.5 rounded hover:bg-slate-700" 
-                      onClick={(e) => { 
-                        e.preventDefault(); 
-                        e.stopPropagation(); 
-                        playAudioFile(sub.refAudioFile as File); 
-                      }}
-                      title="Play Subtitle Ref Audio"
-                   >
-                     <Play className="w-3 h-3 fill-current" />
-                   </button>
-                   <button 
-                      className="hover:text-red-400 text-slate-400 transition-colors p-0.5 rounded hover:bg-red-500/20" 
-                      onClick={(e) => { 
-                        e.preventDefault(); 
-                        e.stopPropagation(); 
-                        updateSubtitles(prev => prev.map(s => s.id === sub.id ? { ...s, refAudioFile: undefined, refAudioBase64: undefined } : s)); 
-                      }}
-                      title="Remove Subtitle Ref Audio"
-                   >
-                     <X className="w-3 h-3" />
-                   </button>
-                 </div>
-               ) : (
-                 <span>Add Ref</span>
-               )}
-               {!sub.refAudioFile && <input type="file" accept="audio/*" onClick={(e) => e.stopPropagation()} onChange={(e) => handleSubReferenceAudioUpload(sub.id, e)} className="hidden" />}
-            </label>
-            <select
-              value={sub.voice === 'default' ? '' : sub.voice}
-              onClick={(e) => e.stopPropagation()}
-              onChange={(e) => handleVoiceChange(sub.id, e.target.value || 'default')}
-              className="w-32 bg-slate-900 text-[10px] text-purple-400/80 border border-slate-700 rounded px-2 py-1 outline-none hover:border-purple-500/50 transition-colors"
-              title={(sub.refAudioFile || referenceAudioFile) ? "Ref Text (Auto if empty)" : `Prompt Text (Default: ${defaultVoxCPMVoice})`}
-            >
-              <option value="">Global Default</option>
-              {VOXCPM_VOICES.map((v) => (
-                <option key={v.id} value={v.id}>{v.label}</option>
-              ))}
-            </select>
-          </div>
-        ) : (
-          <span className="text-[10px] text-slate-600 italic">Default Voice</span>
-        );
-        })()}
-      </div>
-
-       {sub.audioUrl && (
-         <div className="flex items-center gap-2.5 bg-slate-950/40 border border-slate-800/40 rounded-lg py-1.5 px-2.5 mt-2.5 flex-wrap sm:flex-nowrap">
-           <span className="text-[9px] text-slate-500 font-bold uppercase tracking-wider select-none shrink-0">Speech Speed:</span>
-           <input 
-             type="range"
-             min="0.5"
-             max="2.5"
-             step="0.05"
-             value={sub.speedMultiplier || 1.0}
-             onClick={(e) => e.stopPropagation()}
-             onChange={(e) => {
-               const val = parseFloat(e.target.value);
-               updateSubtitles(prev => prev.map(item => item.id === sub.id ? { ...item, speedMultiplier: val } : item));
-             }}
-             className="flex-1 h-1 accent-amber-500 rounded bg-slate-800 cursor-pointer min-w-[60px]"
-             title="Manually stretch speaking rate for this line"
-           />
-           <div className="flex items-center gap-1.5 ml-auto">
-             <span className="text-[10px] font-mono font-bold text-amber-500/95 w-11 shrink-0 text-right">
-               {(sub.speedMultiplier || 1.0).toFixed(2)}x
-             </span>
-             {sub.speedMultiplier && sub.speedMultiplier !== 1.0 && (
-               <button
-                 onClick={(e) => {
-                   e.stopPropagation();
-                   updateSubtitles(prev => prev.map(item => item.id === sub.id ? { ...item, speedMultiplier: undefined } : item));
-                 }}
-                 className="text-[9px] text-slate-400 hover:text-slate-200 bg-slate-800 hover:bg-slate-750 px-1.5 py-0.5 rounded border border-slate-700/60 active:scale-95 transition-all cursor-pointer select-none font-bold uppercase"
-                 title="Reset local speech speed to 1.0x"
-               >
-                 Reset
-               </button>
-             )}
-           </div>
-         </div>
-       )}
-    </div>
-  </div>
-  );
-});
-
-const SpeakerManager = ({ speakers, updateSpeaker, onAutoDetect, applySpeakerToAll, subtitles, ttsEngine, defaultGeminiVoice, defaultVoxCPMVoice }: any) => {
-  // calculate line counts
-  const speakerStats = useMemo(() => {
-    const stats: Record<string, number> = {};
-    subtitles.forEach((s: any) => {
-      const id = s.speakerId || 'Default Speaker';
-      stats[id] = (stats[id] || 0) + 1;
-    });
-    return stats;
-  }, [subtitles]);
-
-  return (
-    <div className="flex flex-col gap-4">
-      <div className="flex items-center justify-between">
-        <h3 className="text-xs font-bold text-slate-500 uppercase tracking-widest">Speakers ({speakers.length})</h3>
-        <button 
-          onClick={onAutoDetect}
-          className="text-[10px] bg-slate-800 hover:bg-slate-700 text-amber-500 px-2 py-1 rounded border border-slate-700 flex items-center gap-1 transition-colors"
-        >
-          <ListChecks className="w-3 h-3" />
-          Auto Detect
-        </button>
-      </div>
-
-      <div className="space-y-3">
-        {speakers.map((speaker: any) => (
-          <div key={speaker.id} className="p-3 bg-slate-900 border border-slate-800 rounded-lg space-y-3 group">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <div className="w-2 h-4 rounded-full" style={{ backgroundColor: speaker.color }} />
-                <span className="text-sm font-bold text-slate-100">{speaker.name}</span>
-                <span className="text-[10px] text-slate-500 bg-slate-950 px-1.5 py-0.5 rounded border border-slate-800">
-                  {speakerStats[speaker.id] || 0} Lines
-                </span>
-              </div>
-              <button
-                onClick={() => applySpeakerToAll(speaker)}
-                className="text-[9px] text-slate-400 hover:text-white bg-slate-800 hover:bg-slate-700 px-1.5 py-0.5 rounded transition-colors uppercase font-bold"
-                title="Apply these voice settings to all lines assigned to this speaker"
-              >
-                Apply to all
-              </button>
-            </div>
-
-            <div className="grid grid-cols-1 gap-2">
-               <div className="space-y-1">
-                 <label className="text-[10px] text-slate-500 uppercase font-bold text-[9px]">Voice & Engine</label>
-                 <div className="flex gap-1">
-                   <select 
-                      value={speaker.engine || 'voxcpm'}
-                      onChange={(e) => updateSpeaker(speaker.id, { engine: e.target.value })}
-                      className="flex-1 bg-slate-950 border border-slate-800 rounded px-1.5 py-1 text-[11px] text-slate-200 outline-none focus:border-amber-500/50"
-                   >
-                     <option value="voxcpm">VoxCPM</option>
-                     <option value="google-free">Google Free</option>
-                     <option value="gemini">Gemini</option>
-                   </select>
-
-                   <input 
-                      type="text"
-                      list={speaker.engine === 'gemini' ? 'gemini-voices' : speaker.engine === 'voxcpm' ? 'voxcpm-voices' : ''}
-                      value={speaker.voice}
-                      onChange={(e) => updateSpeaker(speaker.id, { voice: e.target.value })}
-                      placeholder={speaker.engine === 'google-free' ? 'km' : speaker.engine === 'gemini' ? defaultGeminiVoice : speaker.engine === 'voxcpm' ? defaultVoxCPMVoice : 'Voice ID'}
-                      className="flex-1 bg-slate-950 border border-slate-800 rounded px-1.5 py-1 text-[11px] text-slate-200 outline-none focus:border-amber-500/50"
-                   />
-                 </div>
-               </div>
-
-               <div className="grid grid-cols-2 gap-2">
-                  <div className="space-y-1">
-                    <label className="text-[10px] text-slate-500 uppercase font-bold text-[9px]">Default Emotion</label>
-                    <select
-                      value={speaker.defaultEmotion || ''}
-                      onChange={(e) => updateSpeaker(speaker.id, { defaultEmotion: e.target.value })}
-                      className="w-full bg-slate-950 border border-slate-800 rounded px-1.5 py-1 text-[11px] text-slate-200 outline-none focus:border-amber-500/50"
-                    >
-                      <option value="">None</option>
-                      {EMOTIONS.map(emo => (
-                        <option key={emo.id} value={emo.id}>{emo.icon} {emo.label}</option>
-                      ))}
-                    </select>
-                  </div>
-                  <div className="space-y-1">
-                    <label className="text-[10px] text-slate-500 uppercase font-bold text-[9px]">Sensitivity: {(speaker.emotionSensitivity ?? 0.5).toFixed(1)}</label>
-                    <input 
-                      type="range"
-                      min="0"
-                      max="1"
-                      step="0.1"
-                      value={speaker.emotionSensitivity ?? 0.5}
-                      onChange={(e) => updateSpeaker(speaker.id, { emotionSensitivity: parseFloat(e.target.value) })}
-                      className="w-full accent-amber-500 h-4 bg-slate-950 rounded cursor-pointer"
-                    />
-                  </div>
-               </div>
-
-               <div className="space-y-1">
-                 <label className="text-[10px] text-slate-500 uppercase font-bold text-[9px]">Reference Audio</label>
-                 <div 
-                    className="relative border border-dashed border-slate-800 hover:border-amber-500/50 hover:bg-slate-800/30 transition-colors rounded p-2 flex flex-col items-center justify-center group/drop cursor-pointer min-h-[40px]"
-                 >
-                    {speaker.refAudioFile ? (
-                      <div className="flex items-center gap-2 w-full truncate px-1">
-                        <Music className="w-3 h-3 text-amber-500 shrink-0" />
-                        <span className="text-[10px] text-slate-300 truncate font-mono">{speaker.refAudioFile.name}</span>
-                        <button 
-                          onClick={(e) => { e.stopPropagation(); updateSpeaker(speaker.id, { refAudioFile: null, refAudioBase64: null }); }}
-                          className="ml-auto p-0.5 hover:text-red-400 text-slate-500"
-                        >
-                          <X className="w-3 h-3" />
-                        </button>
-                      </div>
-                    ) : (
-                      <span className="text-[10px] text-slate-500 group-hover/drop:text-slate-300">Drop Ref Audio</span>
-                    )}
-                    <input 
-                      type="file" 
-                      accept="audio/*"
-                      onChange={(e) => {
-                        const file = e.target.files?.[0];
-                        if (file) {
-                          const reader = new FileReader();
-                          reader.onload = () => {
-                             const base64 = (reader.result as string).split(',')[1];
-                             updateSpeaker(speaker.id, { refAudioFile: file, refAudioBase64: base64 });
-                          };
-                          reader.readAsDataURL(file);
-                        }
-                      }}
-                      className="absolute inset-0 opacity-0 cursor-pointer"
-                    />
-                 </div>
-               </div>
-            </div>
-          </div>
-        ))}
-
-        {speakers.length === 0 && (
-          <div className="text-center py-12 px-4 bg-slate-900/20 border border-white/5 border-dashed rounded-lg">
-            <p className="text-[11px] text-slate-500 leading-relaxed italic">
-              No speakers detected.<br/>
-              Use <span className="text-slate-400 font-mono">Speaker: Text</span> format<br/>
-              or click Auto Detect.
-            </p>
-          </div>
-        )}
-      </div>
-    </div>
-  );
-};
+import { 
+  TTS_VOICES, VOXCPM_VOICES, SPEAKER_COLORS, EMOTIONS, DEFAULT_EMOTION_DATA 
+} from './constants';
+import { 
+  parseTime, formatTime, formatKeyCode 
+} from './services/TimeService';
+import { 
+  detectLocalKeywords, cleanTextForTTS, detectSpeaker, parseSRT 
+} from './services/ParserService';
+import { 
+  getAudioDuration, autoTrimSilence, encodeWAV, normalizeAudioBlob, generateWaveform, globalWaveformCache 
+} from './services/AudioService';
+import { TimelineClip } from './components/TimelineClip';
+import { SubtitleListItem } from './components/SubtitleListItem';
+import { SpeakerManager } from './components/SpeakerManager';
+import { ShortcutsModal } from './components/ShortcutsModal';
+import { safeStorage } from './lib/safe-storage';
 
 // Error Boundary to prevent full app crash
 interface ErrorBoundaryProps {
@@ -1313,39 +104,39 @@ export default function App() {
   const [videoVolume, setVideoVolume] = useState(0.1);
   const [dubVolume, setDubVolume] = useState(1.0);
   const [isDuckingEnabled, setIsDuckingEnabled] = useState(() => {
-    const saved = localStorage.getItem('autosave_is_ducking_enabled');
+    const saved = safeStorage.getItem('autosave_is_ducking_enabled');
     return saved !== 'false';
   });
   const [duckingFactor, setDuckingFactor] = useState(() => {
-    const saved = localStorage.getItem('autosave_ducking_factor');
+    const saved = safeStorage.getItem('autosave_ducking_factor');
     return saved ? parseFloat(saved) : 0.20;
   });
 
   useEffect(() => {
-    localStorage.setItem('autosave_is_ducking_enabled', String(isDuckingEnabled));
+    safeStorage.setItem('autosave_is_ducking_enabled', String(isDuckingEnabled));
   }, [isDuckingEnabled]);
 
   const [isNormalizeEnabled, setIsNormalizeEnabled] = useState(() => {
-    const saved = localStorage.getItem('autosave_is_normalize_enabled');
+    const saved = safeStorage.getItem('autosave_is_normalize_enabled');
     return saved !== 'false'; // default to true (active)
   });
 
   useEffect(() => {
-    localStorage.setItem('autosave_is_normalize_enabled', String(isNormalizeEnabled));
+    safeStorage.setItem('autosave_is_normalize_enabled', String(isNormalizeEnabled));
   }, [isNormalizeEnabled]);
 
   useEffect(() => {
-    localStorage.setItem('autosave_ducking_factor', String(duckingFactor));
+    safeStorage.setItem('autosave_ducking_factor', String(duckingFactor));
   }, [duckingFactor]);
-  const [ttsEngine, setTtsEngine] = useState<'gemini' | 'google-free' | 'voxcpm'>(() => (localStorage.getItem('tts_engine') as any) || 'voxcpm');
-  const [defaultGeminiVoice, setDefaultGeminiVoice] = useState<'Puck' | 'Charon' | 'Kore' | 'Fenrir' | 'Aoede'>(() => (localStorage.getItem('default_gemini_voice') as any) || 'Puck');
-  const [defaultVoxCPMVoice, setDefaultVoxCPMVoice] = useState(() => localStorage.getItem('default_voxcpm_voice') || 'khmer-male-1');
+  const [ttsEngine, setTtsEngine] = useState<'gemini' | 'google-free' | 'voxcpm'>(() => (safeStorage.getItem('tts_engine') as any) || 'voxcpm');
+  const [defaultGeminiVoice, setDefaultGeminiVoice] = useState<'Puck' | 'Charon' | 'Kore' | 'Fenrir' | 'Aoede'>(() => (safeStorage.getItem('default_gemini_voice') as any) || 'Puck');
+  const [defaultVoxCPMVoice, setDefaultVoxCPMVoice] = useState(() => safeStorage.getItem('default_voxcpm_voice') || 'khmer-male-1');
   const [leftPanelTab, setLeftPanelTab] = useState<'files' | 'speakers'>('files');
 
   // Customizable Hotkeys State
   const [customHotkeys, setCustomHotkeys] = useState<{ [actionId: string]: string }>(() => {
     try {
-      const saved = localStorage.getItem('autosave_custom_hotkeys');
+      const saved = safeStorage.getItem('autosave_custom_hotkeys');
       if (saved) return JSON.parse(saved);
     } catch {}
     return {
@@ -1366,7 +157,7 @@ export default function App() {
   const customHotkeysRef = useRef(customHotkeys);
   useEffect(() => {
     customHotkeysRef.current = customHotkeys;
-    localStorage.setItem('autosave_custom_hotkeys', JSON.stringify(customHotkeys));
+    safeStorage.setItem('autosave_custom_hotkeys', JSON.stringify(customHotkeys));
   }, [customHotkeys]);
 
   // Visibility states for individual tracks
@@ -1487,7 +278,7 @@ export default function App() {
   // survive a reload — that is still enough to avoid losing hours of editing.
   const [subtitles, setSubtitles] = useState<Subtitle[]>(() => {
     try {
-      const saved = localStorage.getItem('autosave_subtitles');
+      const saved = safeStorage.getItem('autosave_subtitles');
       if (saved) {
         const parsed: Subtitle[] = JSON.parse(saved);
         // Strip un-serialisable fields that will be stale anyway
@@ -1498,6 +289,7 @@ export default function App() {
           waveformPeaks: undefined,
           isGenerating: false,
           refAudioFile: undefined,
+          refAudioBase64: undefined,
         }));
       }
     } catch { /* corrupt data – start fresh */ }
@@ -1506,7 +298,7 @@ export default function App() {
 
   const [speakers, setSpeakers] = useState<Speaker[]>(() => {
     try {
-      const saved = localStorage.getItem('autosave_speakers');
+      const saved = safeStorage.getItem('autosave_speakers');
       if (saved) {
         const parsed: Speaker[] = JSON.parse(saved);
         return parsed.map(s => ({ ...s, refAudioFile: null, refAudioBase64: null }));
@@ -1520,6 +312,7 @@ export default function App() {
   const [currentWorkspace, setCurrentWorkspace] = useState<WorkspaceData | null>(null);
   const [isDirty, setIsDirty] = useState(false);
   const workspaceAutoSaveRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const isFirstLoadRef = useRef(true);
 
   // Initialize workspace system on mount
   useEffect(() => {
@@ -1552,10 +345,14 @@ export default function App() {
 
   // Mark as dirty when subtitles or speakers change
   useEffect(() => {
+    if (isFirstLoadRef.current) {
+      isFirstLoadRef.current = false;
+      return;
+    }
     if (currentWorkspace) {
       setIsDirty(true);
     }
-  }, [subtitles, speakers, ttsEngine, defaultGeminiVoice, defaultVoxCPMVoice, currentWorkspace]);
+  }, [subtitles, speakers, ttsEngine, defaultGeminiVoice, defaultVoxCPMVoice]);
 
   // Auto-save workspace
   useEffect(() => {
@@ -1695,12 +492,16 @@ export default function App() {
           waveformPeaks: undefined,
           isGenerating: false,
           refAudioFile: undefined,
+          refAudioBase64: undefined,
         }));
-        localStorage.setItem('autosave_subtitles', JSON.stringify(toSave));
+        safeStorage.setItem('autosave_subtitles', JSON.stringify(toSave));
         setAutosaveStatus('saved');
         if (autosaveFlashRef.current) clearTimeout(autosaveFlashRef.current);
         autosaveFlashRef.current = setTimeout(() => setAutosaveStatus('idle'), 3000);
-      } catch { /* storage full – ignore */ }
+      } catch (err) {
+        console.warn("LocalStorage space full, blocked by sandbox iframe restrictions, or inaccessible:", err);
+        setAutosaveStatus('idle'); // stop spinning even on fail
+      }
     }, 2000);
     return () => {
       if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current);
@@ -1711,7 +512,7 @@ export default function App() {
   useEffect(() => {
     try {
       const toSave = speakers.map(s => ({ ...s, refAudioFile: null, refAudioBase64: null }));
-      localStorage.setItem('autosave_speakers', JSON.stringify(toSave));
+      safeStorage.setItem('autosave_speakers', JSON.stringify(toSave));
     } catch {}
   }, [speakers]);
 
@@ -1789,7 +590,7 @@ export default function App() {
 
       for (let i = 0; i < toProcess.length; i += batchSize) {
         const batch = toProcess.slice(i, i + batchSize);
-        const localGeminiKey = localStorage.getItem('gemini_api_key');
+        const localGeminiKey = safeStorage.getItem('gemini_api_key');
         console.log("Detecting emotions with key present:", !!localGeminiKey);
         
         // Mark as detecting
@@ -2064,15 +865,15 @@ export default function App() {
   const [timelineViewMode, setTimelineViewMode] = useState<'content' | 'video'>('content');
   const [zoomLevel, setZoomLevel] = useState(60); 
   const [timelineHeight, setTimelineHeight] = useState(() => {
-    const saved = localStorage.getItem('timeline_height');
+    const saved = safeStorage.getItem('timeline_height');
     return saved ? parseInt(saved, 10) : 280;
   });
   const [leftPanelWidth, setLeftPanelWidth] = useState(() => {
-    const saved = localStorage.getItem('left_panel_width');
+    const saved = safeStorage.getItem('left_panel_width');
     return saved ? parseInt(saved, 10) : 320;
   });
   const [videoPanelWidth, setVideoPanelWidth] = useState(() => {
-    const saved = localStorage.getItem('video_panel_width');
+    const saved = safeStorage.getItem('video_panel_width');
     return saved ? parseInt(saved, 10) : 288;
   });
   const [isResizingLeft, setIsResizingLeft] = useState(false);
@@ -2623,7 +1424,7 @@ export default function App() {
     };
     const handleMouseUp = () => {
       setIsResizingLeft(false);
-      localStorage.setItem('left_panel_width', liveLeftWidthRef.current.toString());
+      safeStorage.setItem('left_panel_width', liveLeftWidthRef.current.toString());
       document.body.style.cursor = '';
       document.body.style.userSelect = '';
     };
@@ -2645,7 +1446,7 @@ export default function App() {
     };
     const handleMouseUp = () => {
       setIsResizingVideo(false);
-      localStorage.setItem('video_panel_width', liveVideoWidthRef.current.toString());
+      safeStorage.setItem('video_panel_width', liveVideoWidthRef.current.toString());
       document.body.style.cursor = '';
       document.body.style.userSelect = '';
     };
@@ -2668,7 +1469,7 @@ export default function App() {
     };
     const handleMouseUp = () => {
       setIsResizingTimeline(false);
-      localStorage.setItem('timeline_height', liveTimelineHeightRef.current.toString());
+      safeStorage.setItem('timeline_height', liveTimelineHeightRef.current.toString());
       document.body.style.cursor = '';
       document.body.style.userSelect = '';
     };
@@ -3109,14 +1910,14 @@ export default function App() {
     }
   };
 
-  const [geminiKey, setGeminiKey] = useState(() => localStorage.getItem('gemini_api_key') || '');
-  const [voxcpmUrl, setVoxcpmUrl] = useState(() => localStorage.getItem('voxcpm_url') || 'http://127.0.0.1:8808');
+  const [geminiKey, setGeminiKey] = useState(() => safeStorage.getItem('gemini_api_key') || '');
+  const [voxcpmUrl, setVoxcpmUrl] = useState(() => safeStorage.getItem('voxcpm_url') || 'http://127.0.0.1:8808');
 
   const saveSettings = () => {
-    localStorage.setItem('gemini_api_key', geminiKey);
-    localStorage.setItem('voxcpm_url', voxcpmUrl);
-    localStorage.setItem('default_gemini_voice', defaultGeminiVoice);
-    localStorage.setItem('default_voxcpm_voice', defaultVoxCPMVoice);
+    safeStorage.setItem('gemini_api_key', geminiKey);
+    safeStorage.setItem('voxcpm_url', voxcpmUrl);
+    safeStorage.setItem('default_gemini_voice', defaultGeminiVoice);
+    safeStorage.setItem('default_voxcpm_voice', defaultVoxCPMVoice);
     setShowSettings(false);
   };
 
@@ -3173,7 +1974,7 @@ export default function App() {
       }
 
       if (engineToUse === 'voxcpm') {
-        const baseURL = (localStorage.getItem('voxcpm_url') || 'http://127.0.0.1:8808')
+        const baseURL = (safeStorage.getItem('voxcpm_url') || 'http://127.0.0.1:8808')
           .replace(/\/$/, '');
 
         let refWavPayload = null;
@@ -3335,7 +2136,7 @@ export default function App() {
       // Create a prompt that encourages dramatic, expressive Khmer
       const prompt = `Read the following Khmer text ${styleContext ? (styleContext + intensitySuffix) : 'vividly and passionately, with deeply emotional and dramatic tone resembling a Chinese short video drama'}: ${textToSynthesize}`;
       
-      const localGeminiKey = localStorage.getItem('gemini_api_key');
+      const localGeminiKey = safeStorage.getItem('gemini_api_key');
       
       const response = await fetch('/api/generate-gemini-audio', {
         method: 'POST',
@@ -4329,8 +3130,8 @@ export default function App() {
                 <button
                   onClick={() => {
                     if (window.confirm('Clear all subtitles and the saved session? Audio clips will be lost.')) {
-                      localStorage.removeItem('autosave_subtitles');
-                      localStorage.removeItem('autosave_speakers');
+                      safeStorage.removeItem('autosave_subtitles');
+                      safeStorage.removeItem('autosave_speakers');
                       setSubtitles([]);
                       setSpeakers([]);
                     }

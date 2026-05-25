@@ -63,6 +63,7 @@ export interface Subtitle {
   speed?: number;
   emotionDetected?: boolean;
   emotionStatus?: 'detecting' | 'detected' | 'failed' | 'fallback';
+  speedMultiplier?: number;
 }
 
 export interface Speaker {
