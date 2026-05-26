@@ -47,7 +47,8 @@ export async function handleExportDubbedWAV_FIXED(
     if (maxEndTime <= 0) throw new Error('All clips have zero duration.');
 
     // Use a REAL AudioContext just for decoding (OfflineAudioContext can't decode in some browsers)
-    const decoderCtx = new AudioContext({ sampleRate: SAMPLE_RATE });
+    const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+    const decoderCtx = new AudioContextClass({ sampleRate: SAMPLE_RATE });
 
     let decodedCount = 0;
     let failedCount = 0;
@@ -346,7 +347,8 @@ async function generateWaveformMainThread(url: string, samples = 120): Promise<n
   try {
     const resp = await fetch(url);
     const arrayBuffer = await resp.arrayBuffer();
-    const audioCtx = new AudioContext();
+    const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+    const audioCtx = new AudioContextClass();
     const buffer = await audioCtx.decodeAudioData(arrayBuffer);
     const data = buffer.getChannelData(0);
     const blockSize = Math.floor(data.length / samples);
@@ -371,3 +373,358 @@ async function generateWaveformMainThread(url: string, samples = 120): Promise<n
 
 // Export cache for compatibility with existing globalWaveformCache references
 export const globalWaveformCache = waveformCache;
+
+// ──────────────────────────────────────────────────────────────
+// MULTI-CHANNEL STEREO MIXER ENGINE
+// ──────────────────────────────────────────────────────────────
+
+function encodeStereoWAV(left: Float32Array, right: Float32Array, sampleRate: number): Blob {
+  const buffer = new ArrayBuffer(44 + left.length * 4);
+  const view = new DataView(buffer);
+
+  // RIFF identifier
+  writeString(view, 0, 'RIFF');
+  // file length
+  view.setUint32(4, 36 + left.length * 4, true);
+  // RIFF type
+  writeString(view, 8, 'WAVE');
+  // format chunk identifier
+  writeString(view, 12, 'fmt ');
+  // format chunk length
+  view.setUint32(16, 16, true);
+  // sample format (raw)
+  view.setUint16(20, 1, true);
+  // channel count (2 for stereo)
+  view.setUint16(22, 2, true);
+  // sample rate
+  view.setUint32(24, sampleRate, true);
+  // byte rate (sample rate * block align)
+  view.setUint32(28, sampleRate * 4, true);
+  // block align (channel count * bytes per sample)
+  view.setUint16(32, 4, true);
+  // bits per sample
+  view.setUint16(34, 16, true);
+  // data chunk identifier
+  writeString(view, 36, 'data');
+  // data chunk length
+  view.setUint32(40, left.length * 4, true);
+
+  // Write Interleaved Stereo samples
+  let index = 44;
+  for (let i = 0; i < left.length; i++) {
+    // Left
+    const sL = Math.max(-1, Math.min(1, left[i]));
+    const sampleL = sL < 0 ? sL * 0x8000 : sL * 0x7fff;
+    view.setInt16(index, sampleL, true);
+    index += 2;
+
+    // Right
+    const sR = Math.max(-1, Math.min(1, right[i]));
+    const sampleR = sR < 0 ? sR * 0x8000 : sR * 0x7fff;
+    view.setInt16(index, sampleR, true);
+    index += 2;
+  }
+
+  return new Blob([view], { type: 'audio/wav' });
+}
+
+function writeString(view: DataView, offset: number, string: string) {
+  for (let i = 0; i < string.length; i++) {
+    view.setUint8(offset + i, string.charCodeAt(i));
+  }
+}
+
+export async function handleExportMasterWAV_MIXED(
+  audioClips: any[],
+  videoFile: File | null,
+  bgMusicUrl: string,
+  videoVolume: number,
+  dubVolume: number,
+  bgMusicVolume: number,
+  masterVolume: number,
+  videoMute: boolean,
+  dubMute: boolean,
+  bgMusicMute: boolean,
+  masterMute: boolean,
+  videoSolo: boolean,
+  dubSolo: boolean,
+  bgMusicSolo: boolean,
+  videoPan: number,
+  dubPan: number,
+  bgMusicPan: number,
+  isDuckingEnabled: boolean,
+  duckingFactor: number,
+  totalDuration: number,
+  ffmpegRef: React.MutableRefObject<any>,
+  setIsExportingAudio: (v: boolean) => void,
+  setExportStatus: (v: string | null) => void,
+  setErrorMsg: (v: string | null) => void,
+  fetchFile: any,
+  toBlobURL: any,
+  FFmpegClass: any,
+  exportType: 'audio' | 'video'
+) {
+  if (totalDuration <= 0) {
+    setErrorMsg('Cannot export with zero total timeline duration.');
+    return;
+  }
+
+  setIsExportingAudio(true);
+  setExportStatus('Starting stem analysis...');
+  setErrorMsg(null);
+
+  try {
+    const SAMPLE_RATE = 24000;
+
+    // 1. Decode Video audio track via FFmpeg
+    let originalAudioBuffer: AudioBuffer | null = null;
+    let decodedOriginalSuccess = false;
+
+    if (videoFile) {
+      setExportStatus('Analyzing original video audio track (FFmpeg)...');
+      try {
+        if (!ffmpegRef.current) {
+          const ffmpeg = new FFmpegClass();
+          const baseURL = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/esm';
+          await ffmpeg.load({
+            coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript'),
+            wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm'),
+          });
+          ffmpegRef.current = ffmpeg;
+        }
+
+        const ffmpeg = ffmpegRef.current;
+        const fileExt = videoFile.name.split('.').pop() || 'mp4';
+        await ffmpeg.writeFile('input.' + fileExt, await fetchFile(videoFile));
+
+        setExportStatus('Extracting audio track metadata...');
+        // Extract to 24000Hz stereo WAV
+        await ffmpeg.exec([
+          '-i', 'input.' + fileExt,
+          '-vn',
+          '-ac', '2',
+          '-ar', '24000',
+          'original_audio.wav'
+        ]);
+
+        const audioData = await ffmpeg.readFile('original_audio.wav');
+        if (audioData && audioData.byteLength > 0) {
+          const decoderCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: SAMPLE_RATE });
+          originalAudioBuffer = await decoderCtx.decodeAudioData(audioData.buffer.slice(0));
+          decodedOriginalSuccess = true;
+          await decoderCtx.close();
+        }
+      } catch (err) {
+        console.warn("Audio extraction omitted or failed (standard if video has no track or CORS limits):", err);
+      }
+    }
+
+    // 2. Decode BGM
+    let bgMusicBuffer: AudioBuffer | null = null;
+    if (bgMusicUrl) {
+      setExportStatus('Fetching and loading Background Music...');
+      try {
+        const resp = await fetch(bgMusicUrl);
+        if (resp.ok) {
+          const arrayBuffer = await resp.arrayBuffer();
+          const decoderCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: SAMPLE_RATE });
+          bgMusicBuffer = await decoderCtx.decodeAudioData(arrayBuffer);
+          await decoderCtx.close();
+        }
+      } catch (err) {
+        console.warn("Could not decode BGM track:", err);
+      }
+    }
+
+    // 3. Decode TTS audio clips
+    setExportStatus(`Decoding voice clips (Total: ${audioClips.length})...`);
+    const decodedTTS: { startTime: number; trimStart: number; trimEnd: number; buffer: AudioBuffer }[] = [];
+    const decoderCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: SAMPLE_RATE });
+
+    for (const clip of audioClips) {
+      try {
+        let arrayBuffer: ArrayBuffer | null = null;
+        if (clip.audioBlob instanceof Blob) {
+          arrayBuffer = await clip.audioBlob.arrayBuffer();
+        } else if (clip.audioUrl) {
+          const resp = await fetch(clip.audioUrl);
+          if (resp.ok) {
+            arrayBuffer = await resp.arrayBuffer();
+          }
+        }
+
+        if (arrayBuffer) {
+          const buffer = await decoderCtx.decodeAudioData(arrayBuffer.slice(0));
+          decodedTTS.push({
+            startTime: clip.startTime ?? 0,
+            trimStart: clip.audioTrimStart ?? 0,
+            trimEnd: clip.audioTrimEnd ?? buffer.duration,
+            buffer
+          });
+        }
+      } catch (err) {
+        console.warn(`Vocal clip ${clip.id} omitted:`, err);
+      }
+    }
+    await decoderCtx.close();
+
+    // 4. Offline Multi-Channel Mix Setup
+    setExportStatus('Synthesizing stem outputs in offline mix matrix...');
+    const totalSamples = Math.ceil(totalDuration * SAMPLE_RATE);
+    const offlineCtx = new OfflineAudioContext(2, totalSamples >= SAMPLE_RATE ? totalSamples : SAMPLE_RATE, SAMPLE_RATE);
+
+    const isAnySoloActive = videoSolo || dubSolo || bgMusicSolo;
+
+    // Connect Track A: Original Video Audio
+    const isVideoAudible = !videoMute && (!isAnySoloActive || videoSolo) && !masterMute;
+    if (originalAudioBuffer && isVideoAudible) {
+      const source = offlineCtx.createBufferSource();
+      source.buffer = originalAudioBuffer;
+
+      const gain = offlineCtx.createGain();
+      const baseVol = videoVolume * masterVolume;
+      gain.gain.setValueAtTime(baseVol, 0);
+
+      // Auto-Ducking
+      if (isDuckingEnabled && decodedTTS.length > 0) {
+        for (const clip of decodedTTS) {
+          const s = clip.startTime;
+          const e = s + (clip.trimEnd - clip.trimStart);
+          gain.gain.setValueAtTime(baseVol, Math.max(0, s - 0.15));
+          gain.gain.linearRampToValueAtTime(baseVol * duckingFactor, s);
+          gain.gain.setValueAtTime(baseVol * duckingFactor, e);
+          gain.gain.linearRampToValueAtTime(baseVol, Math.min(totalDuration, e + 0.2));
+        }
+      }
+
+      const panner = offlineCtx.createStereoPanner();
+      panner.pan.setValueAtTime(videoPan, 0);
+
+      source.connect(gain);
+      gain.connect(panner);
+      panner.connect(offlineCtx.destination);
+      source.start(0);
+    }
+
+    // Connect Track B: Background Music
+    const isBgmAudible = bgMusicBuffer && !bgMusicMute && (!isAnySoloActive || bgMusicSolo) && !masterMute;
+    if (bgMusicBuffer && isBgmAudible) {
+      const source = offlineCtx.createBufferSource();
+      source.buffer = bgMusicBuffer;
+      source.loop = true;
+
+      const gain = offlineCtx.createGain();
+      const baseVol = bgMusicVolume * masterVolume;
+      gain.gain.setValueAtTime(baseVol, 0);
+
+      // Auto-Ducking
+      if (isDuckingEnabled && decodedTTS.length > 0) {
+        for (const clip of decodedTTS) {
+          const s = clip.startTime;
+          const e = s + (clip.trimEnd - clip.trimStart);
+          gain.gain.setValueAtTime(baseVol, Math.max(0, s - 0.15));
+          gain.gain.linearRampToValueAtTime(baseVol * duckingFactor, s);
+          gain.gain.setValueAtTime(baseVol * duckingFactor, e);
+          gain.gain.linearRampToValueAtTime(baseVol, Math.min(totalDuration, e + 0.2));
+        }
+      }
+
+      const panner = offlineCtx.createStereoPanner();
+      panner.pan.setValueAtTime(bgMusicPan, 0);
+
+      source.connect(gain);
+      gain.connect(panner);
+      panner.connect(offlineCtx.destination);
+      source.start(0);
+    }
+
+    // Connect Track C: TTS Dub Vocals (multiple channels)
+    const isDubAudible = !dubMute && (!isAnySoloActive || dubSolo) && !masterMute;
+    if (isDubAudible) {
+      for (const { startTime, trimStart, trimEnd, buffer } of decodedTTS) {
+        const source = offlineCtx.createBufferSource();
+        source.buffer = buffer;
+
+        const gain = offlineCtx.createGain();
+        gain.gain.setValueAtTime(dubVolume * masterVolume, 0);
+
+        const panner = offlineCtx.createStereoPanner();
+        panner.pan.setValueAtTime(dubPan, 0);
+
+        source.connect(gain);
+        gain.connect(panner);
+        panner.connect(offlineCtx.destination);
+
+        const dur = trimEnd - trimStart;
+        if (dur > 0) {
+          source.start(Math.max(0, startTime), trimStart, dur);
+        }
+      }
+    }
+
+    // Render Offline buffer
+    setExportStatus('Rendering final master track...');
+    const rendered = await offlineCtx.startRendering();
+
+    const left = rendered.getChannelData(0);
+    const right = rendered.getChannelData(1);
+
+    const masterWav = encodeStereoWAV(left, right, SAMPLE_RATE);
+
+    if (exportType === 'video' && videoFile) {
+      setExportStatus('Composing new audio back into video stream (FFmpeg)...');
+      const ffmpeg = ffmpegRef.current;
+      const fileExt = videoFile.name.split('.').pop() || 'mp4';
+      
+      await ffmpeg.writeFile('master_mix.wav', await fetchFile(masterWav));
+      
+      // Merge audio and video cleanly without re-encoding video streams
+      const outputName = videoFile.name.replace(/\.[^/.]+$/, "") + "_dubbed.mp4";
+      await ffmpeg.exec([
+        '-i', 'input.' + fileExt,
+        '-i', 'master_mix.wav',
+        '-c:v', 'copy',
+        '-map', '0:v',
+        '-map', '1:a',
+        '-shortest',
+        '-y',
+        outputName
+      ]);
+
+      const finishedBytes = await ffmpeg.readFile(outputName);
+      const finishedBlob = new Blob([finishedBytes.buffer], { type: 'video/mp4' });
+
+      const url = URL.createObjectURL(finishedBlob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = outputName;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 6000);
+
+      setExportStatus('Export complete! 🎉');
+      setTimeout(() => setExportStatus(null), 3500);
+    } else {
+      // Audio export download
+      const url = URL.createObjectURL(masterWav);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = (videoFile ? videoFile.name.replace(/\.[^/.]+$/, "") : "dubbed-project") + "_master.wav";
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 6000);
+
+      setExportStatus('Export complete! 🎉');
+      setTimeout(() => setExportStatus(null), 3500);
+    }
+  } catch (err: any) {
+    console.error("Master Export Failed:", err);
+    setErrorMsg("Master Export failed: " + (err.message ?? String(err)));
+    setExportStatus(null);
+  } finally {
+    setIsExportingAudio(false);
+  }
+}
+

@@ -1,4 +1,4 @@
-import { Film, FileText, Play, Pause, Languages, Loader2, Music, Download, Settings, Square, ListChecks, X, Undo2, Redo2, Link2, Link2Off, Plus, Minus, ZoomIn, ZoomOut, HelpCircle, Volume1, Volume2, VolumeX, AlertTriangle, Trash2, RotateCw } from 'lucide-react';
+import { Film, FileText, Play, Pause, Languages, Loader2, Music, Download, Settings, Square, ListChecks, X, Undo2, Redo2, Link2, Link2Off, Plus, Minus, ZoomIn, ZoomOut, HelpCircle, Volume1, Volume2, VolumeX, AlertTriangle, Trash2, RotateCw, Magnet, Sliders, Eye, EyeOff } from 'lucide-react';
 import React, { useEffect, useRef, useState, useMemo, useCallback, Component } from 'react';
 import { motion } from 'motion/react';
 import { FFmpeg } from '@ffmpeg/ffmpeg';
@@ -7,7 +7,7 @@ import * as workspaceLib from './lib/workspace';
 import * as workspaceExport from './lib/workspace-export';
 import { WorkspaceManager } from './components/WorkspaceManager';
 import { WorkspaceData, Subtitle, Speaker } from './lib/workspace-types';
-import { handleExportDubbedWAV_FIXED, VirtualSubtitleList } from './patches/fixes';
+import { handleExportDubbedWAV_FIXED, VirtualSubtitleList, handleExportMasterWAV_MIXED } from './patches/fixes';
 
 import { 
   TTS_VOICES, VOXCPM_VOICES, SPEAKER_COLORS, EMOTIONS, DEFAULT_EMOTION_DATA 
@@ -81,6 +81,17 @@ class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoundarySta
   }
 }
 
+const formatDb = (vol: number) => {
+  if (vol === undefined || vol === null || isNaN(vol) || vol <= 0) return '-∞ dB';
+  const db = 20 * Math.log10(vol);
+  return `${db >= 0 ? '+' : ''}${db.toFixed(1)} dB`;
+};
+
+const formatPan = (pan: number) => {
+  if (pan === undefined || pan === null || isNaN(pan) || pan === 0) return 'CENTER';
+  return pan > 0 ? `R ${Math.round(pan * 100)}%` : `L ${Math.round(Math.abs(pan) * 100)}%`;
+};
+
 export default function App() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const [videoFile, setVideoFile] = useState<File | null>(null);
@@ -101,6 +112,8 @@ export default function App() {
   const timelineStartTimeRef = useRef<number>(0);
   const lastScrollTriggerRef = useRef<number>(0);
   const activeAudioRefs = useRef<Map<number, HTMLAudioElement>>(new Map());
+  const bgMusicAudioRef = useRef<HTMLAudioElement | null>(null);
+
   const [videoVolume, setVideoVolume] = useState(0.1);
   const [dubVolume, setDubVolume] = useState(1.0);
   const [isDuckingEnabled, setIsDuckingEnabled] = useState(() => {
@@ -925,6 +938,88 @@ export default function App() {
   const viewportStartTime = timelineScrollLeft / pixelsPerSecond;
   const [isResizingTimeline, setIsResizingTimeline] = useState(false);
 
+  // Snapping & Magnetic resizing parameters
+  const [isSnappingEnabled, setIsSnappingEnabled] = useState(true);
+  const [isRippleEnabled, setIsRippleEnabled] = useState(false);
+  const [activeSnapLine, setActiveSnapLine] = useState<number | null>(null);
+
+  // Background Music (BGM) stems
+  const [selectedPresetBg, setSelectedPresetBg] = useState<string>('none');
+  const [bgMusicFile, setBgMusicFile] = useState<File | null>(null);
+  const [bgMusicUrl, setBgMusicUrl] = useState<string>('');
+  const [bgMusicVolume, setBgMusicVolume] = useState(0.2);
+  const [bgMusicMute, setBgMusicMute] = useState(false);
+  const [bgMusicSolo, setBgMusicSolo] = useState(false);
+  const [bgMusicPan, setBgMusicPan] = useState(0);
+
+  // Background Music lifetime controller
+  useEffect(() => {
+    if (bgMusicAudioRef.current) {
+      bgMusicAudioRef.current.pause();
+      bgMusicAudioRef.current = null;
+    }
+    if (bgMusicUrl) {
+      const audio = new Audio(bgMusicUrl);
+      audio.loop = true;
+      audio.crossOrigin = 'anonymous';
+      bgMusicAudioRef.current = audio;
+    }
+    return () => {
+      if (bgMusicAudioRef.current) {
+        bgMusicAudioRef.current.pause();
+      }
+    };
+  }, [bgMusicUrl]);
+
+  // Audio Stem channels configuration
+  const [videoMute, setVideoMute] = useState(false);
+  const [videoSolo, setVideoSolo] = useState(false);
+  const [videoPan, setVideoPan] = useState(0);
+
+  const [dubMute, setDubMute] = useState(false);
+  const [dubSolo, setDubSolo] = useState(false);
+  const [dubPan, setDubPan] = useState(0);
+
+  const [masterVolume, setMasterVolume] = useState(0.8);
+  const [masterMute, setMasterMute] = useState(false);
+
+  // Mixer visual collapsible drawer
+  const [showStemMixer, setShowStemMixer] = useState(false);
+  const [isExportingMaster, setIsExportingMaster] = useState(false);
+
+  // WeakMap / cache for Web Audio API stereo panning support
+  const audioPannersRef = useRef(new WeakMap<HTMLAudioElement, { ctx: AudioContext, panner: StereoPannerNode }>());
+
+  const applyStereoPanning = useCallback((audio: HTMLAudioElement, pan: number) => {
+    try {
+      const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+      if (!AudioContextClass) return;
+      
+      let state = audioPannersRef.current.get(audio);
+      if (!state) {
+        const ctx = new AudioContextClass();
+        const source = ctx.createMediaElementSource(audio);
+        let panner: StereoPannerNode;
+        if (ctx.createStereoPanner) {
+          panner = ctx.createStereoPanner();
+        } else {
+          return;
+        }
+        source.connect(panner);
+        panner.connect(ctx.destination);
+        state = { ctx, panner };
+        audioPannersRef.current.set(audio, state);
+      }
+      
+      if (state.ctx.state === 'suspended') {
+        state.ctx.resume();
+      }
+      state.panner.pan.value = pan;
+    } catch (err) {
+      console.debug("Panning omitted or restricted for element:", err);
+    }
+  }, []);
+
   const timelineContainerRef = useRef<HTMLDivElement>(null);
 
   // Track Selection State
@@ -943,9 +1038,46 @@ export default function App() {
     }
   }, []);
 
+  // Computed multi-channel stem levels
+  const isAnySoloActive = videoSolo || dubSolo || bgMusicSolo;
+  
+  const isVideoAudible = !videoMute && (!isAnySoloActive || videoSolo) && !masterMute && isVideoTrackVisible;
+  const targetVideoVolume = isVideoAudible ? (videoVolume * masterVolume) : 0;
+
+  const isDubAudible = !dubMute && (!isAnySoloActive || dubSolo) && !masterMute && isDubTrackVisible;
+  const targetDubVolume = isDubAudible ? (dubVolume * masterVolume) : 0;
+
+  const isBgmAudible = !!bgMusicUrl && !bgMusicMute && (!isAnySoloActive || bgMusicSolo) && !masterMute;
+  const targetBgmVolume = isBgmAudible ? (bgMusicVolume * masterVolume) : 0;
+
   const syncGeneratedAudio = useCallback((time: number, isPaused: boolean = false, playbackRate: number = 1) => {
     const activeSubIdsThisTick = new Set<number>();
     
+    // Sync Background Music (BGM)
+    const bg = bgMusicAudioRef.current;
+    if (bg) {
+      if (isBgmAudible) {
+        const hasActiveDub = activeAudioRefs.current.size > 0;
+        const targetMultiplier = (isDuckingEnabled && hasActiveDub) ? duckingFactor : 1.0;
+        bg.volume = targetBgmVolume * targetMultiplier;
+        applyStereoPanning(bg, bgMusicPan);
+        
+        if (isPaused) {
+          if (!bg.paused) bg.pause();
+        } else {
+          if (bg.paused) {
+            safePlay(bg);
+          }
+          const expectedBgmTime = time % (bg.duration || 30);
+          if (Math.abs(bg.currentTime - expectedBgmTime) > 0.35) {
+            bg.currentTime = expectedBgmTime;
+          }
+        }
+      } else {
+        if (!bg.paused) bg.pause();
+      }
+    }
+
     audioClips.forEach((clip) => {
       const inRange = time >= clip.startTime && time < clip.endTime;
 
@@ -986,7 +1118,9 @@ export default function App() {
         const newAudio = new Audio(clip.audioUrl);
         newAudio.currentTime = expectedTimeInFile;
         newAudio.playbackRate = playbackRate * speedMult;
-        newAudio.volume = isDubTrackVisible ? dubVolume : 0;
+        newAudio.volume = targetDubVolume;
+        applyStereoPanning(newAudio, dubPan);
+
         if (!isPaused && expectedTimeInFile < clip.audioTrimEnd) {
           safePlay(newAudio);
         }
@@ -1003,10 +1137,11 @@ export default function App() {
         if (Math.abs(audio.playbackRate - targetRate) > 0.01) {
           audio.playbackRate = targetRate;
         }
-        const targetVol = isDubTrackVisible ? dubVolume : 0;
-        if (Math.abs(audio.volume - targetVol) > 0.01) {
-          audio.volume = targetVol;
+        
+        if (Math.abs(audio.volume - targetDubVolume) > 0.01) {
+          audio.volume = targetDubVolume;
         }
+        applyStereoPanning(audio, dubPan);
 
         const drift = Math.abs(audio.currentTime - expectedTimeInFile);
         const isSeekingOrScrubbing = isScrubbingRef.current || (videoRef.current?.seeking ?? false);
@@ -1029,22 +1164,39 @@ export default function App() {
         activeAudioRefs.current.delete(id);
       }
     });
-  }, [audioClips, dubVolume, isDubTrackVisible, safePlay, zoomLevel]);
+  }, [audioClips, targetDubVolume, dubPan, isBgmAudible, targetBgmVolume, bgMusicPan, bgMusicUrl, isDuckingEnabled, duckingFactor, safePlay, applyStereoPanning, zoomLevel]);
 
+  // Synchronize Live Video volume & Background Music volume dynamically on state updates
   useEffect(() => {
+    const hasActiveDub = activeAudioRefs.current.size > 0;
+    const targetMultiplier = (isDuckingEnabled && hasActiveDub) ? duckingFactor : 1.0;
+    
+    // Video player volume sync
     if (videoRef.current) {
-        const hasActiveDub = activeAudioRefs.current.size > 0;
-        const targetMultiplier = (isDuckingEnabled && hasActiveDub) ? duckingFactor : 1.0;
-        const targetVol = isVideoTrackVisible ? (videoVolume * targetMultiplier) : 0;
-        videoRef.current.volume = targetVol;
+      videoRef.current.volume = targetVideoVolume * targetMultiplier;
     }
-  }, [videoVolume, isVideoTrackVisible, isDuckingEnabled, duckingFactor]);
 
+    // Background Music volume sync
+    if (bgMusicAudioRef.current) {
+      bgMusicAudioRef.current.volume = targetBgmVolume * targetMultiplier;
+      applyStereoPanning(bgMusicAudioRef.current, bgMusicPan);
+    }
+  }, [
+    targetVideoVolume, 
+    targetBgmVolume, 
+    isDuckingEnabled, 
+    duckingFactor, 
+    bgMusicPan, 
+    applyStereoPanning
+  ]);
+
+  // Synchronize All Dub audio clips volume dynamically on state updates
   useEffect(() => {
-    activeAudioRefs.current.forEach(audio => {
-      audio.volume = isDubTrackVisible ? dubVolume : 0;
+    activeAudioRefs.current.forEach((audio) => {
+      audio.volume = targetDubVolume;
+      applyStereoPanning(audio, dubPan);
     });
-  }, [dubVolume, isDubTrackVisible]);
+  }, [targetDubVolume, dubPan, applyStereoPanning]);
 
   const maxEndTime = useMemo(() => {
     if (subtitles.length === 0) return 0;
@@ -1090,6 +1242,9 @@ export default function App() {
     }
     
     // Stop all active audio on scrub/seek
+    if (bgMusicAudioRef.current) {
+      bgMusicAudioRef.current.pause();
+    }
     activeAudioRefs.current.forEach(audio => {
       audio.pause();
     });
@@ -1109,6 +1264,10 @@ export default function App() {
     
     if (videoRef.current) {
       videoRef.current.pause();
+    }
+    
+    if (bgMusicAudioRef.current) {
+      bgMusicAudioRef.current.pause();
     }
     
     activeAudioRefs.current.forEach(audio => {
@@ -1816,6 +1975,30 @@ export default function App() {
     }
   };
 
+  // Load preset music loops or handle file BGM loading
+  useEffect(() => {
+    if (selectedPresetBg === 'none') {
+      setBgMusicUrl('');
+    } else if (selectedPresetBg === 'chill_lofi') {
+      setBgMusicUrl('https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3');
+    } else if (selectedPresetBg === 'corporate_bright') {
+      setBgMusicUrl('https://www.soundhelix.com/examples/mp3/SoundHelix-Song-2.mp3');
+    } else if (selectedPresetBg === 'cinematic_ambient') {
+      setBgMusicUrl('https://www.soundhelix.com/examples/mp3/SoundHelix-Song-3.mp3');
+    }
+  }, [selectedPresetBg]);
+
+  const handleBgmUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      setBgMusicFile(file);
+      setSelectedPresetBg('custom');
+      const url = URL.createObjectURL(file);
+      allObjectUrlsRef.current.add(url);
+      setBgMusicUrl(url);
+    }
+  };
+
   const handleVideoUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
       const file = e.target.files[0];
@@ -2300,32 +2483,96 @@ export default function App() {
         const currentDx = currentDrag.lastDx;
         const deltaTime = zoomLevel > 0 ? currentDx / zoomLevel : 0;
         
-        // Snapping Logic
-        const snapThreshold = 10 / zoomLevel; 
-        const findSnap = (targetTime: number) => {
-          if (Math.abs(targetTime - timelineCurrentTime) < snapThreshold) {
-            return timelineCurrentTime - targetTime;
+        // Advanced Snapping Engine
+        const snapThreshold = 12 / zoomLevel; 
+        const findSnapPoint = (testTime: number): { time: number; snapped: boolean } => {
+          if (!isSnappingEnabled) return { time: testTime, snapped: false };
+          
+          // 1. Snap to current playhead
+          if (Math.abs(testTime - timelineCurrentTime) < snapThreshold) {
+            return { time: timelineCurrentTime, snapped: true };
           }
+          
+          // 2. Snap to boundaries of other subtitle or audio clips
           for (const s of subtitles) {
             if (s.id === currentDrag.id) continue;
-            if (Math.abs(targetTime - s.startTime) < snapThreshold) return s.startTime - targetTime;
-            if (Math.abs(targetTime - s.endTime) < snapThreshold) return s.endTime - targetTime;
+            if (Math.abs(testTime - s.startTime) < snapThreshold) {
+              return { time: s.startTime, snapped: true };
+            }
+            if (Math.abs(testTime - s.endTime) < snapThreshold) {
+              return { time: s.endTime, snapped: true };
+            }
           }
-          return 0;
+          return { time: testTime, snapped: false };
         };
 
-        const snappedDeltaTime = deltaTime + findSnap(
-          currentDrag.type === 'text' ? currentDrag.initialTime + deltaTime :
-          currentDrag.type === 'audio' ? currentDrag.initialAudioStartTime + deltaTime :
-          0
-        );
+        // Determine which edge is moving to search snap
+        let snapResult = { time: 0, snapped: false };
+        let finalSnapOffset = 0;
+
+        if (currentDrag.type === 'text') {
+          snapResult = findSnapPoint(currentDrag.initialTime + deltaTime);
+          if (snapResult.snapped) {
+            finalSnapOffset = snapResult.time - (currentDrag.initialTime + deltaTime);
+          }
+        } else if (currentDrag.type === 'audio') {
+          snapResult = findSnapPoint(currentDrag.initialAudioStartTime + deltaTime);
+          if (snapResult.snapped) {
+            finalSnapOffset = snapResult.time - (currentDrag.initialAudioStartTime + deltaTime);
+          }
+        } else if (currentDrag.type === 'trim-text-start') {
+          snapResult = findSnapPoint(currentDrag.initialTime + deltaTime);
+          if (snapResult.snapped) {
+            finalSnapOffset = snapResult.time - (currentDrag.initialTime + deltaTime);
+          }
+        } else if (currentDrag.type === 'trim-text-end') {
+          snapResult = findSnapPoint(currentDrag.initialEndTime + deltaTime);
+          if (snapResult.snapped) {
+            finalSnapOffset = snapResult.time - (currentDrag.initialEndTime + deltaTime);
+          }
+        } else if (currentDrag.type === 'trim-audio-start') {
+          snapResult = findSnapPoint(currentDrag.initialAudioStartTime + deltaTime);
+          if (snapResult.snapped) {
+            finalSnapOffset = snapResult.time - (currentDrag.initialAudioStartTime + deltaTime);
+          }
+        } else if (currentDrag.type === 'trim-audio-end') {
+          const trimDur = currentDrag.initialAudioTrimEnd - currentDrag.initialAudioTrimStart;
+          const endEstimated = currentDrag.initialAudioStartTime + trimDur + deltaTime;
+          snapResult = findSnapPoint(endEstimated);
+          if (snapResult.snapped) {
+            finalSnapOffset = snapResult.time - endEstimated;
+          }
+        }
+
+        if (snapResult.snapped) {
+          setActiveSnapLine(snapResult.time);
+        } else {
+          setActiveSnapLine(null);
+        }
+
+        const snappedDeltaTime = deltaTime + finalSnapOffset;
 
         setDragVisuals(prev => {
           if (!prev || prev.id !== currentDrag.id) return prev;
           const next = { ...prev };
           const dt = snappedDeltaTime;
           const isLinked = currentDrag.isLinked;
-          const MIN_DUR = 0.1;
+          const MIN_DUR = 0.05;
+
+          // SPECIAL INTERACTION: SLIP DRAGGING (When Alt / Option key is held down during audio drag)
+          if (currentDrag.type === 'audio' && e.altKey) {
+            // Slides the audio window inward without moving timeline start/end boundaries
+            const maxSlipLeft = -currentDrag.initialAudioTrimStart;
+            const maxSlipRight = currentDrag.initialAudioDuration - currentDrag.initialAudioTrimEnd;
+            const slipDelta = Math.max(maxSlipLeft, Math.min(maxSlipRight, -snappedDeltaTime));
+            
+            next.audioTrimStart = currentDrag.initialAudioTrimStart + slipDelta;
+            next.audioTrimEnd = currentDrag.initialAudioTrimEnd + slipDelta;
+            next.startTime = currentDrag.initialTime;
+            next.endTime = currentDrag.initialEndTime;
+            next.audioStartTime = currentDrag.initialAudioStartTime;
+            return next;
+          }
 
           if (currentDrag.type === 'text') {
             const duration = currentDrag.initialEndTime - currentDrag.initialTime;
@@ -2361,7 +2608,7 @@ export default function App() {
         currentDrag.rafId = null;
       });
     }
-  }, [zoomLevel, timelineCurrentTime, subtitles]);
+  }, [zoomLevel, timelineCurrentTime, subtitles, isSnappingEnabled]);
 
   const handleDragPointerUp = useCallback((e: React.PointerEvent) => {
     const drag = dragInfoRef.current;
@@ -2371,33 +2618,67 @@ export default function App() {
     
     const target = e.currentTarget as HTMLElement;
     target.releasePointerCapture(e.pointerId);
-    
+    setActiveSnapLine(null);
+
     setDragVisuals(finalVisuals => {
       if (finalVisuals && finalVisuals.id === drag.id) {
-        console.log(`[Timeline] Commit ${drag.type} for clip ${drag.id}.`);
-        if (drag.type === 'audio' || drag.type === 'text') {
-           console.log("drag clip", drag.id, "final startTime:", finalVisuals.startTime);
-        } else if (drag.type.startsWith('trim')) {
-           console.log("trim clip", drag.id, "trimStart:", finalVisuals.audioTrimStart, "trimEnd:", finalVisuals.audioTrimEnd);
+        let deltaShift = 0;
+        if (drag.type === 'text') {
+          deltaShift = finalVisuals.startTime - drag.initialTime;
+        } else if (drag.type === 'audio') {
+          deltaShift = finalVisuals.audioStartTime - drag.initialAudioStartTime;
         }
 
-        updateSubtitles(prev => prev.map(s => {
-          if (s.id !== drag.id) return s;
-          return {
-            ...s,
-            startTime: finalVisuals.startTime,
-            endTime: finalVisuals.endTime,
-            audioStartTime: finalVisuals.audioStartTime,
-            audioTrimStart: finalVisuals.audioTrimStart,
-            audioTrimEnd: finalVisuals.audioTrimEnd
-          };
-        }));
+        updateSubtitles(prev => {
+          // INTERACTION: RIPPLE DRAGGING (Shifts all subsequent timeline clips automatically)
+          if (isRippleEnabled && (drag.type === 'text' || drag.type === 'audio')) {
+            const boundaryTime = drag.type === 'text' ? drag.initialTime : drag.initialAudioStartTime;
+            return prev.map(s => {
+              if (s.id === drag.id) {
+                return {
+                  ...s,
+                  startTime: finalVisuals.startTime,
+                  endTime: finalVisuals.endTime,
+                  audioStartTime: finalVisuals.audioStartTime,
+                  audioTrimStart: finalVisuals.audioTrimStart,
+                  audioTrimEnd: finalVisuals.audioTrimEnd
+                };
+              }
+              // Shift all clips starting after/at the current dragged item original boundary
+              if (s.startTime >= boundaryTime - 0.05) {
+                const nextStart = Math.max(0, s.startTime + deltaShift);
+                const nextEnd = Math.max(0.05, s.endTime + deltaShift);
+                const nextAudioStart = s.audioStartTime !== undefined ? Math.max(0, s.audioStartTime + deltaShift) : undefined;
+                return {
+                  ...s,
+                  startTime: nextStart,
+                  endTime: nextEnd,
+                  audioStartTime: nextAudioStart
+                };
+              }
+              return s;
+            });
+          } else {
+            // Normal dragging / trimming
+            return prev.map(s => {
+              if (s.id !== drag.id) return s;
+              return {
+                ...s,
+                startTime: finalVisuals.startTime,
+                endTime: finalVisuals.endTime,
+                audioStartTime: finalVisuals.audioStartTime,
+                audioTrimStart: finalVisuals.audioTrimStart,
+                audioTrimEnd: finalVisuals.audioTrimEnd
+              };
+            });
+          }
+        });
       }
       return null;
     });
 
     dragInfoRef.current = null;
-  }, [updateSubtitles]);
+  }, [updateSubtitles, isRippleEnabled]);
 
   const handleToggleLink = (id: number) => {
     updateSubtitles(prev => prev.map(s => {
@@ -2796,6 +3077,39 @@ export default function App() {
       setIsExportingAudio,
       setExportStatus,
       setErrorMsg
+    );
+  };
+
+  const handleExportMasterMix = async (exportType: 'audio' | 'video') => {
+    await handleExportMasterWAV_MIXED(
+      audioClips,
+      videoFile,
+      bgMusicUrl,
+      videoVolume,
+      dubVolume,
+      bgMusicVolume,
+      masterVolume,
+      videoMute,
+      dubMute,
+      bgMusicMute,
+      masterMute,
+      videoSolo,
+      dubSolo,
+      bgMusicSolo,
+      videoPan,
+      dubPan,
+      bgMusicPan,
+      isDuckingEnabled,
+      duckingFactor,
+      totalDuration,
+      ffmpegRef,
+      setIsExportingAudio,
+      setExportStatus,
+      setErrorMsg,
+      fetchFile,
+      toBlobURL,
+      FFmpeg,
+      exportType
     );
   };
 
@@ -3789,6 +4103,46 @@ export default function App() {
                   {followPlayhead ? <Link2 className="w-4 h-4" /> : <Link2Off className="w-4 h-4" />}
                 </button>
 
+                {/* Snapping Magnet Toggle */}
+                <button
+                  onClick={() => setIsSnappingEnabled(!isSnappingEnabled)}
+                  className={`w-8 h-8 flex items-center justify-center rounded-lg border transition-all active:scale-95 shrink-0 ${
+                    isSnappingEnabled 
+                      ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-400 shadow-lg shadow-emerald-500/20' 
+                      : 'border-slate-700 text-slate-500 hover:text-white hover:border-slate-600/50'
+                  }`}
+                  title={isSnappingEnabled ? 'Magnetic Snapping ON (Boundary snapping enabled)' : 'Magnetic Snapping OFF'}
+                >
+                  <Magnet className="w-4 h-4" />
+                </button>
+
+                {/* Ripple Shift Toggle */}
+                <button
+                  onClick={() => setIsRippleEnabled(!isRippleEnabled)}
+                  className={`w-8 h-8 flex items-center justify-center rounded-lg border transition-all active:scale-95 shrink-0 ${
+                    isRippleEnabled 
+                      ? 'bg-sky-500/15 border-sky-500/40 text-sky-400 shadow-lg shadow-sky-500/20' 
+                      : 'border-slate-700 text-slate-500 hover:text-white hover:border-slate-600/50'
+                  }`}
+                  title={isRippleEnabled ? 'Ripple Edit Mode ON (Timeline shifts downstream clips on drag)' : 'Ripple Edit Mode OFF'}
+                >
+                  <ListChecks className="w-4 h-4" />
+                </button>
+
+                {/* Collapsible Stem Mixer Drawer Toggle */}
+                <button
+                  onClick={() => setShowStemMixer(!showStemMixer)}
+                  className={`w-10 h-8 flex items-center gap-1.5 px-2 rounded-lg border transition-all active:scale-95 shrink-0 font-bold text-[10px] ${
+                    showStemMixer 
+                      ? 'bg-amber-500 border-amber-500/80 text-slate-950 shadow-lg shadow-amber-500/30' 
+                      : 'border-slate-700 bg-slate-800 text-slate-400 hover:text-white hover:border-slate-600/50'
+                  }`}
+                  title="Toggle Multi-Channel Audio Stem Mixer"
+                >
+                  <Sliders className="w-3.5 h-3.5" />
+                  <span>MIXER</span>
+                </button>
+
                 <div className="w-px h-6 bg-slate-700/50 shrink-0 opacity-40 hidden md:block" />
 
                 {/* Volume Mix - Cleaner */}
@@ -4204,6 +4558,19 @@ export default function App() {
                   )}
                 </div>
 
+                {/* Visual Snapping Boundary Guide */}
+                {activeSnapLine !== null && (
+                  <div
+                    className="absolute top-0 bottom-0 z-[90] pointer-events-none transition-all duration-75"
+                    style={{ left: `${TIMELINE_LEFT_OFFSET + activeSnapLine * pixelsPerSecond}px` }}
+                  >
+                    <div className="absolute top-0 bottom-0 w-0.5 -translate-x-1/2 bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.8)] border-dashed border-l border-emerald-400/80" />
+                    <div className="absolute top-2 -translate-x-1/2 bg-emerald-500 text-slate-950 font-bold text-[8px] px-1 rounded shadow">
+                      SNAP
+                    </div>
+                  </div>
+                )}
+
                 {/* Playhead indicator - Enhanced */}
                 <div
                   className="absolute top-0 bottom-0 z-[100] pointer-events-none"
@@ -4225,7 +4592,496 @@ export default function App() {
           </div>
         </div>
 
-          {/* Mobile upload controls */}
+        {/* MULTI-CHANNEL STEM OUTPUT MIXER DRAWER */}
+        <motion.div
+           initial={false}
+           animate={{ height: showStemMixer ? 'auto' : 0, opacity: showStemMixer ? 1 : 0 }}
+           transition={{ duration: 0.25, ease: 'easeInOut' }}
+           className="border-t border-slate-800 bg-slate-900/95 overflow-hidden relative"
+         >
+           <div className="p-4 md:p-6 flex flex-col gap-5 text-slate-200 select-none pb-8">
+             {/* Console Header */}
+             <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 border-b border-slate-800/80 pb-4">
+               <div className="flex items-center gap-2.5">
+                 <div className="p-1.5 b-1 bg-amber-500/10 rounded-lg border border-amber-500/30">
+                   <Sliders className="w-5 h-5 text-amber-500" />
+                 </div>
+                 <div>
+                   <h2 className="text-sm font-black tracking-wider text-white uppercase flex items-center gap-2">
+                     Multi-Channel Stem Output Mixer <span className="bg-amber-500/10 text-amber-400 border border-amber-500/30 text-[9px] px-2 py-0.5 rounded-full font-black">PRO STUDIO</span>
+                   </h2>
+                   <p className="text-[10px] text-slate-400 mt-0.5">Live 2-channel panning, mute/solo matrices, sound loops, and real-time GPU LED level indicators</p>
+                 </div>
+               </div>
+               
+               <div className="flex flex-wrap items-center gap-3">
+                 {/* Auto-Ducking Compressor Panel */}
+                 <div className="flex items-center gap-2 bg-slate-950 px-3.5 py-1.5 rounded-xl border border-slate-850 shrink-0">
+                   <span className="text-[9px] font-black text-slate-400 uppercase tracking-widest flex items-center gap-1">
+                     <span className="w-1.5 h-1.5 bg-rose-500 rounded-full animate-ping" /> AUTO-DUCKING
+                   </span>
+                   <button
+                     onClick={() => setIsDuckingEnabled(!isDuckingEnabled)}
+                     className={`w-9 h-5 rounded-full p-0.5 transition-colors cursor-pointer relative ${isDuckingEnabled ? 'bg-amber-500 shadow-[0_0_8px_rgba(245,158,11,0.5)]' : 'bg-slate-800'}`}
+                   >
+                     <div className={`w-4 h-4 rounded-full bg-white transition-all transform absolute top-0.5 ${isDuckingEnabled ? 'left-4.5' : 'left-0.5'}`} />
+                   </button>
+                   {isDuckingEnabled && (
+                     <div className="flex items-center gap-1.5 ml-1">
+                       <span className="text-[9px] text-slate-300 font-mono font-bold tabular-nums">-{Math.round((1 - duckingFactor) * 100)}%</span>
+                       <input
+                         type="range"
+                         min="0.1"
+                         max="0.9"
+                         step="0.05"
+                         value={duckingFactor}
+                         onChange={(e) => setDuckingFactor(parseFloat(e.target.value))}
+                         className="w-16 h-1 accent-amber-500 bg-slate-850 rounded cursor-ew-resize"
+                       />
+                     </div>
+                   )}
+                 </div>
+
+                 {/* Studio Master Exports */}
+                 <div className="flex items-center bg-slate-950 border border-slate-850 rounded-xl p-1 shrink-0 gap-1">
+                   <button
+                     onClick={() => handleExportMasterMix('audio')}
+                     disabled={isExportingAudio}
+                     className="px-3 py-1.5 rounded-lg text-[9px] font-black tracking-wider text-slate-300 hover:text-white hover:bg-slate-900 transition-all cursor-pointer disabled:opacity-50 border border-transparent hover:border-slate-800"
+                     title="Mix and download as a high-fidelity 2-channel master stereo WAV file"
+                   >
+                     EXPORT WAV MASTER
+                   </button>
+                   {videoFile && (
+                     <button
+                       onClick={() => handleExportMasterMix('video')}
+                       disabled={isExportingAudio}
+                       className="px-3 py-1.5 rounded-lg text-[9px] font-black tracking-wider text-amber-400 bg-amber-500/10 hover:bg-amber-500/15 border border-amber-500/20 hover:border-amber-500/40 transition-all cursor-pointer disabled:opacity-50 shadow-[0_0_12px_rgba(245,158,11,0.05)]"
+                       title="Compose mixed master track into video file"
+                     >
+                       COMPOSE VIDEO (MP4)
+                     </button>
+                   )}
+                 </div>
+               </div>
+             </div>
+
+             {/* Channel strips console grid */}
+             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5 bg-slate-950/40 p-4 rounded-2xl border border-slate-850">
+               
+               {/* CH-01: ORIGINAL CHANNEL STRIP */}
+               <div className="flex flex-col bg-slate-950/90 rounded-xl border border-slate-800 p-4 relative overflow-hidden before:absolute before:top-0 before:left-0 before:right-0 before:h-1 before:bg-cyan-500 before:shadow-[0_1px_4px_rgba(6,182,212,0.4)]">
+                 <div className="absolute top-2 right-2 text-[8px] text-slate-600 font-mono font-bold tracking-widest">CH-01</div>
+                 <div className="flex items-center justify-between mb-2">
+                   <span className="text-[10px] font-black text-slate-300 tracking-wider uppercase">Original Audio</span>
+                   <span className="text-[9px] font-mono text-cyan-400 bg-cyan-950/30 px-1.5 py-0.5 rounded border border-cyan-900/30 font-bold tabular-nums">{Math.round(videoVolume * 100)}%</span>
+                 </div>
+
+                 {/* Digital Display OLED HUD */}
+                 <div className="flex items-center justify-between bg-slate-900/90 px-2.5 py-1.5 rounded-lg border border-slate-850 mb-3 font-mono">
+                   <span className="text-[8px] text-slate-500 uppercase tracking-widest font-black">GAIN DB</span>
+                   <span className="text-[10px] text-cyan-400 font-extrabold tracking-wide">{formatDb(videoVolume)}</span>
+                 </div>
+
+                 {/* Pan Control Slider */}
+                 <div className="flex flex-col gap-1 mb-4 select-none">
+                   <div className="flex justify-between items-center text-[8px] font-black text-slate-500 font-mono px-0.5 uppercase tracking-wider">
+                     <span>L</span>
+                     <span className="text-teal-400 font-bold">PAN: {formatPan(videoPan)}</span>
+                     <span>R</span>
+                   </div>
+                   <div className="relative flex items-center bg-slate-900/60 p-1.5 rounded-lg border border-slate-850">
+                     <div className="absolute left-1/2 top-1 bottom-1 w-0.5 bg-slate-800 -translate-x-1/2 pointer-events-none z-0" />
+                     <input
+                       type="range"
+                       min="-1"
+                       max="1"
+                       step="0.05"
+                       value={videoPan}
+                       onChange={(e) => setVideoPan(parseFloat(e.target.value))}
+                       className="w-full h-1 bg-slate-950 accent-cyan-400 rounded-sm cursor-ew-resize relative z-10"
+                     />
+                   </div>
+                 </div>
+
+                 {/* Vertical Level Fader Box with DB Tick Markers & Signal meters */}
+                 <div className="h-36 flex items-stretch bg-slate-900/60 rounded-xl border border-slate-850 relative p-3 mb-4 select-none">
+                   {/* Level ticks */}
+                   <div className="flex flex-col justify-between text-[8px] font-bold text-slate-500 font-mono text-left select-none pr-1.5 w-7 z-15 pointer-events-none">
+                     <span>+6</span>
+                     <span>0</span>
+                     <span>-6</span>
+                     <span>-12</span>
+                     <span>-24</span>
+                     <span>-40</span>
+                     <span>-∞</span>
+                   </div>
+
+                   {/* Slotted physical slot center */}
+                   <div className="flex-1 flex justify-center items-center relative overflow-hidden h-full">
+                     <div className="w-1.5 bg-slate-950 border border-slate-850 rounded-full h-full relative flex justify-center items-center shadow-inner">
+                       <input
+                         type="range"
+                         min="0"
+                         max="1.5"
+                         step="0.01"
+                         value={videoVolume}
+                         onChange={(e) => setVideoVolume(parseFloat(e.target.value))}
+                         className="absolute w-28 -rotate-90 origin-center accent-amber-500 bg-transparent h-5 cursor-ns-resize"
+                         title="Volume Fader"
+                       />
+                     </div>
+                   </div>
+
+                   {/* Segmented signal LED display column */}
+                   <div className="w-2.5 flex flex-col justify-between items-center pl-1 select-none">
+                     <div className="w-1.5 h-full bg-slate-950 rounded border border-slate-900 overflow-hidden relative shadow-inner">
+                       <div 
+                         className={`w-full bg-gradient-to-t from-emerald-500 via-amber-400 to-rose-500 origin-bottom absolute bottom-0 transition-transform duration-75 ${isPlaying ? 'vu-flicker-ch1' : ''}`}
+                         style={{ height: '100%', transform: isPlaying ? 'none' : 'scaleY(0.04)' }}
+                       />
+                     </div>
+                   </div>
+                 </div>
+
+                 {/* Console Action Buttons */}
+                 <div className="grid grid-cols-2 gap-2 mt-auto pt-3 border-t border-slate-900/50">
+                   <button
+                     onClick={() => setVideoMute(!videoMute)}
+                     className={`py-1.5 rounded-lg font-mono text-[9px] font-black tracking-widest transition-all duration-200 flex items-center justify-center gap-1 border ${
+                       videoMute 
+                         ? 'bg-red-500/20 border-red-500/80 text-red-400 shadow-md shadow-red-500/10' 
+                         : 'bg-slate-900 border-slate-850 text-slate-500 hover:text-slate-300 hover:border-slate-800'
+                     }`}
+                   >
+                     <div className={`w-1.5 h-1.5 rounded-full ${videoMute ? 'bg-red-500 shadow-[0_0_8px_#ef4444]' : 'bg-slate-700'}`} />
+                     MUTE
+                   </button>
+                   <button
+                     onClick={() => setVideoSolo(!videoSolo)}
+                     className={`py-1.5 rounded-lg font-mono text-[9px] font-black tracking-widest transition-all duration-200 flex items-center justify-center gap-1 border ${
+                       videoSolo 
+                         ? 'bg-amber-500/20 border-amber-500/80 text-amber-400 shadow-md shadow-amber-500/10' 
+                         : 'bg-slate-900 border-slate-850 text-slate-500 hover:text-slate-300 hover:border-slate-800'
+                     }`}
+                   >
+                     <div className={`w-1.5 h-1.5 rounded-full ${videoSolo ? 'bg-amber-500 shadow-[0_0_8px_#f59e0b]' : 'bg-slate-700'}`} />
+                     SOLO
+                   </button>
+                 </div>
+               </div>
+
+               {/* CH-02: DUBBED CHANNEL STRIP */}
+               <div className="flex flex-col bg-slate-950/90 rounded-xl border border-slate-800 p-4 relative overflow-hidden before:absolute before:top-0 before:left-0 before:right-0 before:h-1 before:bg-amber-500 before:shadow-[0_1px_4px_rgba(245,158,11,0.4)]">
+                 <div className="absolute top-2 right-2 text-[8px] text-slate-600 font-mono font-bold tracking-widest">CH-02</div>
+                 <div className="flex items-center justify-between mb-2">
+                   <span className="text-[10px] font-black text-slate-300 tracking-wider uppercase">Dubbed Vocal</span>
+                   <span className="text-[9px] font-mono text-amber-400 bg-amber-955/30 px-1.5 py-0.5 rounded border border-amber-900/30 font-bold tabular-nums">{Math.round(dubVolume * 100)}%</span>
+                 </div>
+
+                 {/* Digital Display OLED HUD */}
+                 <div className="flex items-center justify-between bg-slate-900/90 px-2.5 py-1.5 rounded-lg border border-slate-850 mb-3 font-mono">
+                   <span className="text-[8px] text-slate-500 uppercase tracking-widest font-black">GAIN DB</span>
+                   <span className="text-[10px] text-amber-400 font-extrabold tracking-wide">{formatDb(dubVolume)}</span>
+                 </div>
+
+                 {/* Pan Control Slider */}
+                 <div className="flex flex-col gap-1 mb-4 select-none">
+                   <div className="flex justify-between items-center text-[8px] font-black text-slate-500 font-mono px-0.5 uppercase tracking-wider">
+                     <span>L</span>
+                     <span className="text-teal-400 font-bold">PAN: {formatPan(dubPan)}</span>
+                     <span>R</span>
+                   </div>
+                   <div className="relative flex items-center bg-slate-900/60 p-1.5 rounded-lg border border-slate-850">
+                     <div className="absolute left-1/2 top-1 bottom-1 w-0.5 bg-slate-800 -translate-x-1/2 pointer-events-none z-0" />
+                     <input
+                       type="range"
+                       min="-1"
+                       max="1"
+                       step="0.05"
+                       value={dubPan}
+                       onChange={(e) => setDubPan(parseFloat(e.target.value))}
+                       className="w-full h-1 bg-slate-950 accent-cyan-400 rounded-sm cursor-ew-resize relative z-10"
+                     />
+                   </div>
+                 </div>
+
+                 {/* Vertical Level Fader Box with DB Tick Markers & Signal meters */}
+                 <div className="h-36 flex items-stretch bg-slate-900/60 rounded-xl border border-slate-850 relative p-3 mb-4 select-none">
+                   {/* Level ticks */}
+                   <div className="flex flex-col justify-between text-[8px] font-bold text-slate-500 font-mono text-left select-none pr-1.5 w-7 z-15 pointer-events-none">
+                     <span>+6</span>
+                     <span>0</span>
+                     <span>-6</span>
+                     <span>-12</span>
+                     <span>-24</span>
+                     <span>-40</span>
+                     <span>-∞</span>
+                   </div>
+
+                   {/* Slotted physical slot center */}
+                   <div className="flex-1 flex justify-center items-center relative overflow-hidden h-full">
+                     <div className="w-1.5 bg-slate-950 border border-slate-850 rounded-full h-full relative flex justify-center items-center shadow-inner">
+                       <input
+                         type="range"
+                         min="0"
+                         max="1.5"
+                         step="0.01"
+                         value={dubVolume}
+                         onChange={(e) => setDubVolume(parseFloat(e.target.value))}
+                         className="absolute w-28 -rotate-90 origin-center accent-amber-500 bg-transparent h-5 cursor-ns-resize"
+                         title="Volume Fader"
+                       />
+                     </div>
+                   </div>
+
+                   {/* Segmented signal LED display column */}
+                   <div className="w-2.5 flex flex-col justify-between items-center pl-1 select-none">
+                     <div className="w-1.5 h-full bg-slate-950 rounded border border-slate-900 overflow-hidden relative shadow-inner">
+                       <div 
+                         className={`w-full bg-gradient-to-t from-emerald-500 via-amber-400 to-rose-500 origin-bottom absolute bottom-0 transition-transform duration-75 ${isPlaying ? 'vu-flicker-ch2' : ''}`}
+                         style={{ height: '100%', transform: isPlaying ? 'none' : 'scaleY(0.04)' }}
+                       />
+                     </div>
+                   </div>
+                 </div>
+
+                 {/* Console Action Buttons */}
+                 <div className="grid grid-cols-2 gap-2 mt-auto pt-3 border-t border-slate-900/50">
+                   <button
+                     onClick={() => setDubMute(!dubMute)}
+                     className={`py-1.5 rounded-lg font-mono text-[9px] font-black tracking-widest transition-all duration-200 flex items-center justify-center gap-1 border ${
+                       dubMute 
+                         ? 'bg-red-500/20 border-red-500/80 text-red-400 shadow-md shadow-red-500/10' 
+                         : 'bg-slate-900 border-slate-850 text-slate-500 hover:text-slate-300 hover:border-slate-800'
+                     }`}
+                   >
+                     <div className={`w-1.5 h-1.5 rounded-full ${dubMute ? 'bg-red-500 shadow-[0_0_8px_#ef4444]' : 'bg-slate-700'}`} />
+                     MUTE
+                   </button>
+                   <button
+                     onClick={() => setDubSolo(!dubSolo)}
+                     className={`py-1.5 rounded-lg font-mono text-[9px] font-black tracking-widest transition-all duration-200 flex items-center justify-center gap-1 border ${
+                       dubSolo 
+                         ? 'bg-amber-500/20 border-amber-500/80 text-amber-400 shadow-md shadow-amber-500/10' 
+                         : 'bg-slate-900 border-slate-850 text-slate-500 hover:text-slate-300 hover:border-slate-800'
+                     }`}
+                   >
+                     <div className={`w-1.5 h-1.5 rounded-full ${dubSolo ? 'bg-amber-500 shadow-[0_0_8px_#f59e0b]' : 'bg-slate-700'}`} />
+                     SOLO
+                   </button>
+                 </div>
+               </div>
+
+               {/* CH-03: BACKGROUND MUSIC STRIP (Symmetric Layout) */}
+               <div className="flex flex-col bg-slate-950/90 rounded-xl border border-slate-800 p-4 relative overflow-hidden before:absolute before:top-0 before:left-0 before:right-0 before:h-1 before:bg-fuchsia-500 before:shadow-[0_1px_4px_rgba(217,70,239,0.4)]">
+                 <div className="absolute top-2 right-2 text-[8px] text-slate-600 font-mono font-bold tracking-widest">CH-03</div>
+                 <div className="flex items-center justify-between mb-2">
+                   <span className="text-[10px] font-black text-slate-300 tracking-wider uppercase">Music (BGM)</span>
+                   <span className="text-[9px] font-mono text-fuchsia-400 bg-fuchsia-955/30 px-1.5 py-0.5 rounded border border-fuchsia-900/30 font-bold tabular-nums">{Math.round(bgMusicVolume * 100)}%</span>
+                 </div>
+
+                 {/* Digital Display OLED HUD */}
+                 <div className="flex items-center justify-between bg-slate-900/90 px-2.5 py-1.5 rounded-lg border border-slate-850 mb-3 font-mono">
+                   <span className="text-[8px] text-slate-500 uppercase tracking-widest font-black">GAIN DB</span>
+                   <span className="text-[10px] text-fuchsia-400 font-extrabold tracking-wide">{formatDb(bgMusicVolume)}</span>
+                 </div>
+
+                 {/* Multi-channel interactive loop preset controls instead of horizontal pan */}
+                 <div className="grid grid-cols-5 gap-1.5 mb-4">
+                   <div className="col-span-4 relative select-none">
+                     <select
+                       value={selectedPresetBg}
+                       onChange={(e) => setSelectedPresetBg(e.target.value)}
+                       className="w-full bg-slate-900 hover:bg-slate-850 border border-slate-800 focus:border-fuchsia-500 text-white rounded-lg px-2 py-1 text-[9.5px] font-bold focus:outline-none transition-all cursor-pointer appearance-none pr-5 text-ellipsis overflow-hidden whitespace-nowrap"
+                       title="Select BGM Preset Theme"
+                     >
+                       <option value="none">🎸 None (Muted)</option>
+                       <option value="chill_lofi">☕ Chill Lofi Loop</option>
+                       <option value="corporate_bright">✨ Bright Corporate</option>
+                       <option value="cinematic_ambient">🔮 Epic Ambient</option>
+                       {bgMusicFile && <option value="custom">📁 Custom Upload</option>}
+                     </select>
+                     <div className="absolute inset-y-0 right-1.5 flex items-center pointer-events-none text-slate-500 text-[8px]">▼</div>
+                   </div>
+
+                   <label className="col-span-1 flex items-center justify-center bg-slate-900 hover:bg-slate-850 text-slate-400 hover:text-fuchsia-400 border border-slate-800 rounded-lg cursor-pointer transition-all active:scale-95 shadow-sm" title="Upload custom stereo background audio track">
+                     <Music className="w-3 h-3" />
+                     <input type="file" accept="audio/*" onChange={handleBgmUpload} className="hidden" />
+                   </label>
+                 </div>
+
+                 {/* Vertical Level Fader Box with DB Tick Markers & Signal meters */}
+                 <div className="h-36 flex items-stretch bg-slate-900/60 rounded-xl border border-slate-850 relative p-3 mb-4 select-none">
+                   {/* Level ticks */}
+                   <div className="flex flex-col justify-between text-[8px] font-bold text-slate-500 font-mono text-left select-none pr-1.5 w-7 z-15 pointer-events-none">
+                     <span>+6</span>
+                     <span>0</span>
+                     <span>-6</span>
+                     <span>-12</span>
+                     <span>-24</span>
+                     <span>-40</span>
+                     <span>-∞</span>
+                   </div>
+
+                   {/* Slotted physical slot center */}
+                   <div className="flex-1 flex justify-center items-center relative overflow-hidden h-full">
+                     <div className="w-1.5 bg-slate-950 border border-slate-850 rounded-full h-full relative flex justify-center items-center shadow-inner">
+                       <input
+                         type="range"
+                         min="0"
+                         max="1.5"
+                         step="0.01"
+                         value={bgMusicVolume}
+                         onChange={(e) => setBgMusicVolume(parseFloat(e.target.value))}
+                         className="absolute w-28 -rotate-90 origin-center accent-amber-500 bg-transparent h-5 cursor-ns-resize"
+                         title="Volume Fader"
+                       />
+                     </div>
+                   </div>
+
+                   {/* Segmented signal LED display column */}
+                   <div className="w-2.5 flex flex-col justify-between items-center pl-1 select-none">
+                     <div className="w-1.5 h-full bg-slate-950 rounded border border-slate-900 overflow-hidden relative shadow-inner">
+                       <div 
+                         className={`w-full bg-gradient-to-t from-emerald-500 via-amber-400 to-rose-500 origin-bottom absolute bottom-0 transition-transform duration-75 ${isPlaying ? 'vu-flicker-ch3' : ''}`}
+                         style={{ height: '100%', transform: isPlaying ? 'none' : 'scaleY(0.04)' }}
+                       />
+                     </div>
+                   </div>
+                 </div>
+
+                 {/* Console Action Buttons */}
+                 <div className="grid grid-cols-2 gap-2 mt-auto pt-3 border-t border-slate-900/50">
+                   <button
+                     onClick={() => setBgMusicMute(!bgMusicMute)}
+                     className={`py-1.5 rounded-lg font-mono text-[9px] font-black tracking-widest transition-all duration-200 flex items-center justify-center gap-1 border ${
+                       bgMusicMute 
+                         ? 'bg-red-500/20 border-red-500/80 text-red-400 shadow-md shadow-red-500/10' 
+                         : 'bg-slate-900 border-slate-850 text-slate-500 hover:text-slate-300 hover:border-slate-800'
+                     }`}
+                   >
+                     <div className={`w-1.5 h-1.5 rounded-full ${bgMusicMute ? 'bg-red-500 shadow-[0_0_8px_#ef4444]' : 'bg-slate-700'}`} />
+                     MUTE
+                   </button>
+                   <button
+                     onClick={() => setBgMusicSolo(!bgMusicSolo)}
+                     className={`py-1.5 rounded-lg font-mono text-[9px] font-black tracking-widest transition-all duration-200 flex items-center justify-center gap-1 border ${
+                       bgMusicSolo 
+                         ? 'bg-amber-500/20 border-amber-500/80 text-amber-400 shadow-md shadow-amber-500/10' 
+                         : 'bg-slate-900 border-slate-850 text-slate-500 hover:text-slate-300 hover:border-slate-800'
+                     }`}
+                   >
+                     <div className={`w-1.5 h-1.5 rounded-full ${bgMusicSolo ? 'bg-amber-500 shadow-[0_0_8px_#f59e0b]' : 'bg-slate-700'}`} />
+                     SOLO
+                   </button>
+                 </div>
+               </div>
+
+               {/* CH-04 / BUS-OUT: MASTER BUS MODULE */}
+               <div className="flex flex-col bg-slate-950/95 rounded-xl border-2 border-amber-500/35 p-4 shadow-xl shadow-amber-500/5 relative overflow-hidden before:absolute before:top-0 before:left-0 before:right-0 before:h-1.5 before:bg-gradient-to-r before:from-amber-400 before:to-amber-500 before:shadow-[0_2px_8px_rgba(245,158,11,0.5)]">
+                 <div className="absolute top-2.5 right-2 flex items-center gap-1 text-[8px] text-amber-500 font-mono font-extrabold tracking-widest">
+                   <div className="w-1.5 h-1.5 bg-amber-500 rounded-full animate-pulse shadow-[0_0_6px_#f59e0b]" />
+                   BUS-OUT
+                 </div>
+                 <div className="flex items-center justify-between mb-2">
+                   <span className="text-[10px] font-black text-amber-400 tracking-wider uppercase">Master Stereo Out</span>
+                   <span className="text-[9px] font-mono text-amber-400 bg-amber-955/35 px-1.5 py-0.5 rounded border border-amber-500/30 font-bold tabular-nums">{Math.round(masterVolume * 100)}%</span>
+                 </div>
+
+                 {/* Digital Display OLED HUD */}
+                 <div className="flex items-center justify-between bg-slate-900/90 px-2.5 py-1.5 rounded-lg border border-slate-850 mb-3 font-mono">
+                   <span className="text-[8px] text-slate-500 uppercase tracking-widest font-black">MASTER DB</span>
+                   <span className="text-[10px] text-amber-400 font-extrabold tracking-wide">{formatDb(masterVolume)}</span>
+                 </div>
+
+                 {/* Interactive Horizontal Dual Stereo VU meters */}
+                 <div className="flex flex-col gap-1 mb-4 select-none bg-slate-900 p-2 rounded-lg border border-slate-950">
+                   <div className="flex justify-between items-center text-[7.5px] font-bold text-slate-500 font-mono scale-95 origin-left">
+                     <span>L-CH SIGNAL</span>
+                     <span>R-CH SIGNAL</span>
+                   </div>
+                   <div className="grid grid-cols-2 gap-1.5 bg-slate-950 p-1 rounded border border-slate-900 h-4.5 overflow-hidden">
+                     <div className="relative h-full w-full bg-slate-900 rounded-sm overflow-hidden flex">
+                       <div 
+                         className={`h-full bg-gradient-to-r from-emerald-500 via-amber-400 to-rose-500 origin-left transition-transform duration-75 ${isPlaying ? 'vu-flicker-master-l' : ''}`}
+                         style={{ width: '100%', transform: isPlaying ? 'none' : 'scaleX(0.04)' }}
+                       />
+                     </div>
+                     <div className="relative h-full w-full bg-slate-900 rounded-sm overflow-hidden flex">
+                       <div 
+                         className={`h-full bg-gradient-to-r from-emerald-500 via-amber-400 to-rose-500 origin-left transition-transform duration-75 ${isPlaying ? 'vu-flicker-master-r' : ''}`}
+                         style={{ width: '100%', transform: isPlaying ? 'none' : 'scaleX(0.04)' }}
+                       />
+                     </div>
+                   </div>
+                 </div>
+
+                 {/* Symmetrical Master Level Fader Box with Dual LED Columns */}
+                 <div className="h-36 flex items-stretch bg-slate-900/80 rounded-xl border border-slate-850 relative p-3 mb-4 select-none">
+                   {/* Level ticks */}
+                   <div className="flex flex-col justify-between text-[8px] font-bold text-slate-400 font-mono text-left select-none pr-1.5 w-7 z-15 pointer-events-none">
+                     <span>+6</span>
+                     <span>0</span>
+                     <span>-6</span>
+                     <span>-12</span>
+                     <span>-24</span>
+                     <span>-40</span>
+                     <span>-∞</span>
+                   </div>
+
+                   {/* Slotted physical slot center */}
+                   <div className="flex-1 flex justify-center items-center relative overflow-hidden h-full">
+                     <div className="w-1.5 bg-slate-950 border border-slate-850 rounded-full h-full relative flex justify-center items-center shadow-inner">
+                       <input
+                         type="range"
+                         min="0"
+                         max="1.5"
+                         step="0.01"
+                         value={masterVolume}
+                         onChange={(e) => setMasterVolume(parseFloat(e.target.value))}
+                         className="absolute w-28 -rotate-90 origin-center accent-amber-500 bg-transparent h-5 cursor-ns-resize"
+                         title="Master Fader"
+                       />
+                     </div>
+                   </div>
+
+                   {/* Master Dual Stereo VU meter LED display columns (L & R) */}
+                   <div className="w-5 flex justify-between items-center pl-1.5 select-none gap-0.5">
+                     {/* Left Master Meter */}
+                     <div className="w-1.5 h-full bg-slate-950 rounded border border-slate-900 overflow-hidden relative shadow-inner">
+                       <div 
+                         className={`w-full bg-gradient-to-t from-emerald-500 via-amber-400 to-rose-500 origin-bottom absolute bottom-0 transition-transform duration-75 ${isPlaying ? 'vu-flicker-master-l' : ''}`}
+                         style={{ height: '100%', transform: isPlaying ? 'none' : 'scaleY(0.04)' }}
+                       />
+                     </div>
+                     {/* Right Master Meter */}
+                     <div className="w-1.5 h-full bg-slate-950 rounded border border-slate-900 overflow-hidden relative shadow-inner">
+                       <div 
+                         className={`w-full bg-gradient-to-t from-emerald-500 via-amber-400 to-rose-500 origin-bottom absolute bottom-0 transition-transform duration-75 ${isPlaying ? 'vu-flicker-master-r' : ''}`}
+                         style={{ height: '100%', transform: isPlaying ? 'none' : 'scaleY(0.04)' }}
+                       />
+                     </div>
+                   </div>
+                 </div>
+
+                 {/* Master Action Button - High Status Bus Block */}
+                 <button
+                   onClick={() => setMasterMute(!masterMute)}
+                   className={`w-full py-2 rounded-lg font-mono text-[10px] font-black tracking-widest transition-all duration-200 mt-auto flex items-center justify-center gap-1.5 border uppercase ${
+                     masterMute 
+                       ? 'bg-red-600 border-red-500 text-white shadow-lg shadow-red-600/30' 
+                       : 'bg-slate-900 border-slate-850 text-slate-400 hover:text-white hover:border-slate-800'
+                   }`}
+                 >
+                   <div className={`w-1.5 h-1.5 rounded-full ${masterMute ? 'bg-white shadow-[0_0_8px_#ffffff]' : 'bg-red-500 shadow-[0_0_6px_#ef4444]'}`} />
+                   {masterMute ? 'MASTER MUTED' : 'MASTER LIVE'}
+                 </button>
+               </div>
+
+             </div>
+           </div>
+         </motion.div>
           <div className="md:hidden p-4 border-t border-slate-800 bg-slate-900/50 flex flex-col gap-2 shrink-0">
              <div className="flex gap-2">
                <label className="flex-1 text-center py-2 px-4 bg-slate-800 border border-slate-700 rounded text-xs font-medium text-slate-300 cursor-pointer">

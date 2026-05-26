@@ -1,1 +1,87 @@
 @import "tailwindcss";
+
+@layer utilities {
+  /* Dynamic Audio VU Meter Flickers (Optimized to run on GPU) */
+  .vu-flicker-ch1 {
+    animation: vu-flicker-ch1-anim 1.2s infinite ease-in-out;
+  }
+  .vu-flicker-ch2 {
+    animation: vu-flicker-ch2-anim 0.9s infinite ease-in-out;
+  }
+  .vu-flicker-ch3 {
+    animation: vu-flicker-ch3-anim 1.5s infinite ease-in-out;
+  }
+  .vu-flicker-master-l {
+    animation: vu-flicker-master-l-anim 0.7s infinite ease-in-out;
+  }
+  .vu-flicker-master-r {
+    animation: vu-flicker-master-r-anim 0.82s infinite ease-in-out;
+  }
+
+  @keyframes vu-flicker-ch1-anim {
+    0%, 100% { transform: scaleY(0.12); }
+    15% { transform: scaleY(0.72); }
+    30% { transform: scaleY(0.42); }
+    45% { transform: scaleY(0.88); }
+    60% { transform: scaleY(0.25); }
+    75% { transform: scaleY(0.65); }
+    90% { transform: scaleY(0.50); }
+  }
+
+  @keyframes vu-flicker-ch2-anim {
+    0%, 100% { transform: scaleY(0.18); }
+    12% { transform: scaleY(0.95); }
+    25% { transform: scaleY(0.35); }
+    38% { transform: scaleY(0.78); }
+    50% { transform: scaleY(0.55); }
+    65% { transform: scaleY(0.92); }
+    78% { transform: scaleY(0.20); }
+    88% { transform: scaleY(0.68); }
+  }
+
+  @keyframes vu-flicker-ch3-anim {
+    0%, 100% { transform: scaleY(0.15); }
+    18% { transform: scaleY(0.48); }
+    35% { transform: scaleY(0.30); }
+    52% { transform: scaleY(0.65); }
+    70% { transform: scaleY(0.55); }
+    85% { transform: scaleY(0.38); }
+  }
+
+  @keyframes vu-flicker-master-l-anim {
+    0%, 100% { transform: scaleX(0.08); }
+    10% { transform: scaleX(0.85); }
+    20% { transform: scaleX(0.55); }
+    35% { transform: scaleX(0.95); }
+    50% { transform: scaleX(0.42); }
+    65% { transform: scaleX(0.78); }
+    80% { transform: scaleX(0.62); }
+    90% { transform: scaleX(0.88); }
+  }
+
+  @keyframes vu-flicker-master-r-anim {
+    0%, 100% { transform: scaleX(0.05); }
+    12% { transform: scaleX(0.78); }
+    25% { transform: scaleX(0.48); }
+    40% { transform: scaleX(0.92); }
+    55% { transform: scaleX(0.35); }
+    68% { transform: scaleX(0.82); }
+    82% { transform: scaleX(0.58); }
+    92% { transform: scaleX(0.90); }
+  }
+}
+
+/* Custom scrollbars for loop category selections */
+.custom-scrollbar::-webkit-scrollbar {
+  width: 4px;
+}
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: rgba(15, 23, 42, 0.4);
+}
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: rgba(245, 158, 11, 0.3);
+  border-radius: 9999px;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: rgba(245, 158, 11, 0.5);
+}
